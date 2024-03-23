@@ -2,4 +2,6 @@
 *.cfg
 /.idea
 /venv
+/Scripts
+/Lib
 scratch.*
