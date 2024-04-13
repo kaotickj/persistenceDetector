@@ -1,7 +1,11 @@
 # created by virtualenv automatically
 *.cfg
 /.idea
+/build
 /venv
 /Scripts
 /Lib
 scratch.*
+*.spec
+old_*
+**/old_*
