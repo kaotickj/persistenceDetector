@@ -1,33 +1,84 @@
+import tkinter.font as tkFont
 import tkinter as tk
 from tkinter import messagebox
 import winreg
 import base64
 import re
 import string
-import subprocess
-
 
 class RegistryCheckerApp:
     def __init__(self, root):
-        self.root = root
-        self.root.title("Registry Persistence Detector")
-        self.root.geometry("800x600")
+        # setting title
+        root.title("Registry Persistence Detector")
+        #setting window size
+        width=600
+        height=400
+        screenwidth = root.winfo_screenwidth()
+        screenheight = root.winfo_screenheight()
+        alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth - width) / 2, (screenheight - height) / 2)
+        root.geometry(alignstr)
+        root.resizable(width=False, height=False)
 
-        # Menu
-        menubar = tk.Menu(self.root)
-        filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="About", command=self.show_about)
-        filemenu.add_command(label="Help", command=self.show_help)
-        menubar.add_cascade(label="Menu", menu=filemenu)
-        self.root.config(menu=menubar)
+        menubar = tk.Menu(root)
+        root.config(menu=menubar)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Menu", menu=file_menu)
+        file_menu.add_command(label="About", command=self.show_about)
+        file_menu.add_command(label="Help", command=self.show_help)
 
-        # Output Textbox
-        self.output_text = tk.Text(self.root, height=30, width=100, wrap="word")
-        self.output_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        output_label=tk.Label(root)
+        ft = tkFont.Font(family='Times',size=11)
+        output_label["font"] = ft
+        output_label["fg"] = "#333333"
+        output_label["justify"] = "center"
+        output_label["text"] = "Results: "
+        output_label.place(x=20,y=100,width=70,height=25)
 
-        # Check Button
-        self.check_button = tk.Button(self.root, text="Check Registry", command=self.check_registry)
-        self.check_button.pack(pady=10)
+        self.output_text=tk.Text(root)
+        ft = tkFont.Font(family='Times',size=11)
+        self.output_text["font"] = ft
+        self.output_text["fg"] = "#333333"
+        self.output_text.place(x=10,y=130,width=574,height=200)
+
+        check_button=tk.Button(root)
+        check_button["bg"] = "#e9e9ed"
+        ft = tkFont.Font(family='Times',size=11)
+        check_button["font"] = ft
+        check_button["fg"] = "#000000"
+        check_button["justify"] = "center"
+        check_button["text"] = "Check Registry"
+        check_button.place(x=240,y=340,width=110,height=25)
+        check_button["command"] = self.check_registry
+
+        options_label=tk.Label(root)
+        ft = tkFont.Font(family='Times',size=11)
+        options_label["font"] = ft
+        options_label["fg"] = "#333333"
+        options_label["justify"] = "center"
+        options_label["text"] = "Scan Options :"
+        options_label.place(x=20,y=30,width=90,height=25)
+
+        options_powershell=tk.Checkbutton(root)
+        ft = tkFont.Font(family='Times',size=11)
+        options_powershell["font"] = ft
+        options_powershell["fg"] = "#333333"
+        options_powershell["justify"] = "center"
+        options_powershell["text"] = "Powershell Commands"
+        options_powershell.place(x=80,y=60,width=170,height=25)
+        options_powershell["offvalue"] = "1"
+        options_powershell["onvalue"] = "0"
+        options_powershell["command"] = self.options_powershell_command
+
+        options_encoded=tk.Checkbutton(root)
+        ft = tkFont.Font(family='Times',size=11)
+        options_encoded["font"] = ft
+        options_encoded["fg"] = "#333333"
+        options_encoded["justify"] = "center"
+        options_encoded["text"] = "Encoded Payloads"
+        options_encoded.place(x=320,y=60,width=170,height=25)
+        options_encoded["offvalue"] = "1"
+        options_encoded["onvalue"] = "0"
+        options_encoded["command"] = self.options_encoded_command
 
     def check_registry(self):
         self.output_text.delete(1.0, tk.END)
@@ -122,12 +173,17 @@ class RegistryCheckerApp:
         except Exception:
             return False
 
+    def options_powershell_command(self):
+        self.output_text.insert(tk.END, "Scan for Powershell Commands Enabled\n")
+
+    def options_encoded_command(self):
+        self.output_text.insert(tk.END, "Scan for Encoded Commands Enabled\n")
+
     def show_about(self):
-        messagebox.showinfo("About", "This application is developed by KaotickJ for detecting and remediating malicious registry persistence.")
+        messagebox.showinfo("About", "This application is developed by Kaotick Jay for detecting and remediating malicious registry persistence.")
 
     def show_help(self):
         messagebox.showinfo("Help", "To use this application, simply click the 'Check Registry' button to detect any malicious registry persistence.")
-
 
 if __name__ == "__main__":
     root = tk.Tk()
