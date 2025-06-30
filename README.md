@@ -25,11 +25,11 @@ cd persistenceDetector
 3. Run the Python script:
 
 ```sh
-python registry_checker.py
+python detectpersist.py
 ```
 or run persistenceDetector.exe double clicking the icon or running:
 ```cmd
-persistenceDetector.exe
+detectpersist.exe
 ```
 
 ## Usage
