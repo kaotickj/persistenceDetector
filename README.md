@@ -3,7 +3,7 @@
 
 ![Logo](/screen.png)
 
-A Python program to detect malicious registry persistence entries in the Windows Registry.
+> A Python program to detect malicious registry persistence entries in the Windows Registry.
 
 ## Dependencies
 
