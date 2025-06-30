@@ -1,7 +1,7 @@
 # Registry Persistence Detector
 ![GitHub License](https://img.shields.io/github/license/kaotickj/persistenceDetector) ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/kaotickj/persistenceDetector) ![GitHub top language](https://img.shields.io/github/languages/top/kaotickj/persistenceDetector)
 
-[![Logo](/screen.png)
+![Logo](/screen.png)
 A Python program to detect malicious registry persistence entries in the Windows Registry.
 
 ## Dependencies
