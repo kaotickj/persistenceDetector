@@ -6,10 +6,13 @@ are data only: never executed, expanded, imported, or used as filesystem paths.
 import base64
 import binascii
 import re
+import getpass
+import platform
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
-BUILD = "0.2.0+build.1"
+BUILD = "0.2.0+build.2"
 RUN_PATHS = (
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
@@ -47,8 +50,22 @@ class Coverage:
     detail: str = ""
 
 
-@dataclass
+def source_labels():
+    # Informational labels, not authenticated machine/account identifiers.
+    try:
+        account = getpass.getuser()
+    except (OSError, KeyError):
+        account = ""
+    return (platform.node(), account)
+
+
+@dataclass(frozen=True)
 class ScanReport:
+    scan_started_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    source_labels: Tuple[str, str] = field(default_factory=source_labels)
+    view: str = "64-bit"
+    powershell: bool = True
+    encoded: bool = True
     entries: List[RegistryValue] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)
     coverage: List[Coverage] = field(default_factory=list)
@@ -106,7 +123,7 @@ def scan_registry(registry, view="64-bit", powershell=True, encoded=True):
     if view not in ("32-bit", "64-bit"):
         raise ValueError("view must be '32-bit' or '64-bit'")
     access = registry.KEY_READ | (registry.KEY_WOW64_32KEY if view == "32-bit" else registry.KEY_WOW64_64KEY)
-    report = ScanReport()
+    report = ScanReport(view=view, powershell=powershell, encoded=encoded)
 
     def collect(hive, path, category, names=None, optional=True):
         opened = False

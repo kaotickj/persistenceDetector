@@ -3,6 +3,8 @@
 import tkinter.font as tkFont
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import filedialog
+import evidence
 import winreg
 from persistence_core import BUILD, scan_registry
 import webbrowser
@@ -32,7 +34,7 @@ class RegistryCheckerApp:
     def __init__(self, root):
         root.title(f"Persistence Detector — {BUILD} (read-only)")
         width = 600
-        height = 450
+        height = 550
         screenwidth = root.winfo_screenwidth()
         screenheight = root.winfo_screenheight()
         alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth - width) / 2, (screenheight - height) / 2)
@@ -128,6 +130,15 @@ class RegistryCheckerApp:
         delete_button["command"] = self.delete_selected_key
 
         self.findings = []
+        self.scan_report = None
+        for x, title, command in (
+            (10, "Full inventory", self.show_inventory),
+            (200, "Export JSON", self.export_evidence),
+            (390, "Compare baseline", self.compare_baseline),
+        ):
+            tk.Button(root, text=title, command=command).place(x=x, y=425, width=180, height=28)
+        tk.Label(root, text="JSON reports contain sensitive local paths and commands. Share carefully.").place(
+            x=10, y=465, width=574, height=25)
 
         # Notify user of privilege level on startup
         if is_user_admin():
@@ -248,6 +259,7 @@ class RegistryCheckerApp:
         self.combo_box.set('')
         self.combo_box["values"] = []
         self.findings = []
+        self.scan_report = None
         report = scan_registry(
             winreg, view=self.registry_view_var.get(),
             powershell=bool(self.powershell_var.get()),
@@ -289,6 +301,88 @@ class RegistryCheckerApp:
         self.combo_box["values"] = display_items
         if display_items:
             self.combo_box.current(0)
+
+    def _document(self):
+        if self.scan_report is None:
+            messagebox.showinfo("Scan first", "Run a registry scan before viewing or exporting evidence.")
+            return None
+        try:
+            return evidence.to_document(self.scan_report)
+        except ValueError as exc:
+            messagebox.showerror("Invalid scan evidence", str(exc))
+            return None
+
+    def show_inventory(self):
+        document = self._document()
+        if document is None:
+            return
+        try:
+            content = evidence.dumps(document)
+        except ValueError as exc:
+            messagebox.showerror("Inventory too large", str(exc))
+            return
+        self.output_text.delete(1.0, tk.END)
+        self.output_text.insert(tk.END, "FULL INVENTORY — observations, not malware verdicts.\n")
+        self.output_text.insert(tk.END, content)
+
+    def export_evidence(self):
+        try:
+            document = self._document()
+            if document is None:
+                return
+            content = evidence.dumps(document)
+            path = filedialog.asksaveasfilename(
+                title="Export evidence (may contain sensitive paths/commands)",
+                defaultextension=".json", filetypes=[("JSON evidence", "*.json")])
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(content)
+            messagebox.showinfo("Exported", "JSON evidence saved. This is not a restorable registry backup.")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export failed", str(exc))
+
+    def compare_baseline(self):
+        try:
+            current = self._document()
+            if current is None:
+                return
+            path = filedialog.askopenfilename(
+                title="Select a previous JSON evidence report", filetypes=[("JSON evidence", "*.json")])
+            if not path:
+                return
+            with open(path, "rb") as stream:
+                raw = stream.read(evidence.MAX_BYTES + 1)
+            if len(raw) > evidence.MAX_BYTES:
+                raise ValueError("Evidence exceeds 10 MiB limit")
+            baseline = evidence.loads(raw.decode("utf-8"))
+            source = baseline['source']
+            if not messagebox.askyesno(
+                    "Confirm evidence source",
+                    f"Baseline: host {source['host_label']!r}, account {source['account_label']!r}.\n"
+                    f"Baseline scan: {baseline['scan_started_utc']}\n"
+                    f"Current scan: {current['scan_started_utc']}\n\n"
+                    "Labels are not authenticated identifiers. Can you confirm both scans came "
+                    "from the SAME machine and SAME Windows account? Otherwise cancel; "
+                    "changes cannot be reliably attributed."):
+                return
+            changes = evidence.compare(baseline, current, same_source_confirmed=True)
+            self.output_text.delete(1.0, tk.END)
+            self.output_text.insert(tk.END,
+                "BASELINE COMPARISON — registry changes are not malware verdicts.\n"
+                "Unassessed means current coverage could not establish absence.\n"
+                "Newly observed means baseline coverage could not establish prior absence.\n"
+                "Comparison uses the last scan snapshot, not a fresh scan.\n\n")
+            for status, items in changes.items():
+                self.output_text.insert(tk.END, f"{status}: {len(items)}\n")
+                if status == "unchanged":
+                    continue
+                for item in items:
+                    value = item['after'] if status == 'changed' else item
+                    self.output_text.insert(tk.END,
+                        f"  [{value['view']}] {value['hive']}\\{value['path']} → {value['name']!r}\n")
+        except (OSError, ValueError, UnicodeError) as exc:
+            messagebox.showerror("Baseline comparison failed", str(exc))
 
     def delete_selected_key(self):
         # Deliberately no write API, backup serializer, or recursive retry.

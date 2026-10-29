@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -50,6 +51,7 @@ class GuiAdapterTests(unittest.TestCase):
         self.app.registry_view_var = Variable('32-bit')
         self.app.powershell_var = Variable(1)
         self.app.encoded_var = Variable(1)
+        self.app.scan_report = None
 
     def test_repeated_scan_clears_stale_selection_and_retains_identity(self):
         self.registry.add(1, RUN_PATHS[0], [('first', 'pwsh', 1)])
@@ -64,6 +66,44 @@ class GuiAdapterTests(unittest.TestCase):
         self.assertEqual(self.app.combo_box.selection, '')
         self.assertIn('No indicators found', self.app.output_text.content)
         self.assertIn('does not mean clean', self.app.output_text.content)
+
+    def test_no_scan_and_dialog_cancellation_leave_output_unchanged(self):
+        with patch.object(self.module.messagebox, 'showinfo') as info:
+            self.app.show_inventory()
+            info.assert_called_once()
+        self.app.check_registry()
+        previous = self.app.output_text.content
+        with patch.object(self.module.filedialog, 'asksaveasfilename', return_value=''):
+            self.app.export_evidence()
+        with patch.object(self.module.filedialog, 'askopenfilename', return_value=''):
+            self.app.compare_baseline()
+        self.assertEqual(previous, self.app.output_text.content)
+
+    def test_export_inventory_and_baseline_import(self):
+        import evidence
+        self.registry.add(1, RUN_PATHS[0], [('value', b'\x00\xff', 3)])
+        self.app.check_registry()
+        self.app.show_inventory()
+        self.assertIn('FULL INVENTORY', self.app.output_text.content)
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'report.json')
+            with patch.object(self.module.filedialog, 'asksaveasfilename', return_value=path), patch.object(self.module.messagebox, 'showinfo'):
+                self.app.export_evidence()
+            document = evidence.loads(Path(path).read_text())
+            self.assertEqual(document['entries'][0]['data']['value'], '00ff')
+            previous = self.app.output_text.content
+            with patch.object(self.module.filedialog, 'askopenfilename', return_value=path), patch.object(self.module.messagebox, 'askyesno', return_value=False):
+                self.app.compare_baseline()
+            self.assertEqual(previous, self.app.output_text.content)
+            with patch.object(self.module.filedialog, 'askopenfilename', return_value=path), patch.object(self.module.messagebox, 'askyesno', return_value=True):
+                self.app.compare_baseline()
+            self.assertIn('unchanged: 1', self.app.output_text.content)
+            Path(path).write_text('{bad json')
+            previous = self.app.output_text.content
+            with patch.object(self.module.filedialog, 'askopenfilename', return_value=path), patch.object(self.module.messagebox, 'showerror') as error:
+                self.app.compare_baseline()
+                error.assert_called_once()
+            self.assertEqual(previous, self.app.output_text.content)
 
     def test_all_denied_and_disabled_options_are_explicit(self):
         from persistence_core import SERVICES_PATH
