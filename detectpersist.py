@@ -6,7 +6,8 @@ from tkinter import messagebox
 from tkinter import filedialog
 import evidence
 import winreg
-from persistence_core import BUILD, scan_registry
+from persistence_core import BUILD
+from audit import scan_audit
 import webbrowser
 from tkinter import ttk
 import sys
@@ -72,7 +73,7 @@ class RegistryCheckerApp:
         check_button["font"] = ft
         check_button["fg"] = "#000000"
         check_button["justify"] = "center"
-        check_button["text"] = "Check Registry"
+        check_button["text"] = "Scan"
         check_button.place(x=240, y=340, width=110, height=25)
         check_button["command"] = self.check_registry
 
@@ -169,7 +170,7 @@ class RegistryCheckerApp:
             instruction_win,
             text=(
                 "USAGE INSTRUCTIONS:\n\n"
-                "1. Click 'Check Registry' to scan for suspicious entries.\n"
+                "1. Click 'Scan' to scan for suspicious entries.\n"
                 "2. Check or uncheck options for encoded payloads and PowerShell detection.\n"
                 "3. Select 'Registry View' from the dropdown:\n"
                 "   - On 32-bit systems: Only '32-bit' is needed and used.\n"
@@ -222,7 +223,7 @@ class RegistryCheckerApp:
         close_btn.pack(pady=(10, 10))
 
     def show_help(self):
-        messagebox.showinfo("Help", "Click 'Check Registry' to inventory selected registry locations and review indicators. This read-only scan cannot prove a machine clean; inspect coverage errors and unimplemented collectors.")
+        messagebox.showinfo("Help", "Click 'Scan' to inventory selected registry locations and review indicators. This read-only scan cannot prove a machine clean; inspect coverage errors and unimplemented collectors.")
 
     def show_donate_dialog(self):
         donate_win = tk.Toplevel()
@@ -260,7 +261,7 @@ class RegistryCheckerApp:
         self.combo_box["values"] = []
         self.findings = []
         self.scan_report = None
-        report = scan_registry(
+        report = scan_audit(
             winreg, view=self.registry_view_var.get(),
             powershell=bool(self.powershell_var.get()),
             encoded=bool(self.encoded_var.get()),
@@ -270,10 +271,11 @@ class RegistryCheckerApp:
         self.output_text.insert(tk.END,
             f"Build {BUILD} — read-only; view: {self.registry_view_var.get()}\n"
             f"Signals enabled: PowerShell={bool(self.powershell_var.get())}, encoded={bool(self.encoded_var.get())}\n"
-            f"Inventoried {len(report.entries)} values; {len(report.findings)} review indicators.\n"
+            f"Inventoried {len(report.entries)} registry values, {len(report.observations)} task/startup observations; {len(report.findings)} registry review indicators.\n"
             "Indicators are not proof of malware. Nothing found does not mean clean.\n"
             "Coverage: current-user/machine Run and RunOnce; service/driver ImagePath and ServiceDll.\n"
-            "NOT scanned: tasks, startup folders, WMI, other users, COM and other persistence.\n\n"
+            "Also inventorying visible scheduled tasks and current-account/common startup folders.\n"
+            "NOT scanned: WMI, other user startup folders/hives, COM and other persistence.\n\n"
         )
         for finding in self.findings:
             value = finding.value
@@ -288,6 +290,11 @@ class RegistryCheckerApp:
             if item.status == "error":
                 self.output_text.insert(tk.END,
                     f"COVERAGE ERROR [{item.view}] {item.hive}\\{item.path}: {item.detail}\n")
+        for item in report.collector_coverage:
+            self.output_text.insert(tk.END,
+                f"{item['collector']} / {item['target']}: {item['status']} — {item['detail']}\n")
+        if any(item['status'] == 'error' for item in report.collector_coverage):
+            self.output_text.insert(tk.END, "Task/startup inventory incomplete; review coverage errors.\n")
         missing = sum(item.status == "missing" for item in report.coverage)
         self.output_text.insert(tk.END,
             f"\nCoverage: {len(report.errors)} errors; {missing} absent optional locations.\n"
@@ -363,7 +370,7 @@ class RegistryCheckerApp:
                     f"Baseline scan: {baseline['scan_started_utc']}\n"
                     f"Current scan: {current['scan_started_utc']}\n\n"
                     "Labels are not authenticated identifiers. Can you confirm both scans came "
-                    "from the SAME machine and SAME Windows account? Otherwise cancel; "
+                    "from the SAME machine, SAME Windows account, and SAME privilege context? Otherwise cancel; "
                     "changes cannot be reliably attributed."):
                 return
             changes = evidence.compare(baseline, current, same_source_confirmed=True)
@@ -379,6 +386,10 @@ class RegistryCheckerApp:
                     continue
                 for item in items:
                     value = item['after'] if status == 'changed' else item
+                    if "collector" in value:
+                        self.output_text.insert(tk.END,
+                            f"  {value['collector']} / {value['target']} → {value['identity']!r}\n")
+                        continue
                     self.output_text.insert(tk.END,
                         f"  [{value['view']}] {value['hive']}\\{value['path']} → {value['name']!r}\n")
         except (OSError, ValueError, UnicodeError) as exc:

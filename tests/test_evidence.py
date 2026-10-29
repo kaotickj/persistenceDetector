@@ -25,7 +25,7 @@ class EvidenceTests(unittest.TestCase):
                              ('integer', 42, 4), ('command', 'pwsh -enc !!!', 2)])
         self.assertEqual(evidence.loads(evidence.dumps(document)), document)
         self.assertEqual(document['schema'], evidence.SCHEMA)
-        self.assertEqual(document['build'], '0.2.0+build.2')
+        self.assertEqual(document['build'], '0.2.0+build.3')
         self.assertEqual(document['entries'][0]['data'], {'kind': 'bytes', 'value': '00ff'})
         self.assertEqual(len(document['entries'][3]['reasons']), 2)
 
@@ -173,6 +173,77 @@ class EvidenceTests(unittest.TestCase):
         first['scan_started_utc'] = 'not-a-time'
         with self.assertRaises(ValueError):
             evidence.validate(first)
+
+    def external_doc(self, present=True, status='scanned'):
+        document = self.doc()
+        document['collector_coverage'][0] = {
+            'collector': 'scheduled-tasks', 'target': 'local-visible-tasks',
+            'status': status, 'detail': '', 'location': ''}
+        # Replace all defaults to avoid depending on target ordering.
+        document['collector_coverage'] = [document['collector_coverage'][0]]
+        document['observations'] = ([{'collector': 'scheduled-tasks', 'target': 'local-visible-tasks',
+                                    'identity': r'\Folder\Example',
+                                    'data': {'command': 'never execute this', 'enabled': True}}]
+                                    if present else [])
+        return document
+
+    def test_external_changes_respect_coverage(self):
+        old = self.external_doc()
+        for status, expected in (('scanned', 'unassessed'), ('error', 'unassessed')):
+            new = self.external_doc(False, status)
+            self.assertEqual(len(compare(old, new)[expected]), 1)
+        new = self.external_doc()
+        new['observations'][0]['data']['enabled'] = False
+        self.assertEqual(len(compare(old, new)['changed']), 1)
+        self.assertEqual(evidence.loads(evidence.dumps(new)), new)
+
+    def test_startup_redirection_never_claims_removal_or_change(self):
+        def startup(folder, present=True):
+            document = self.doc()
+            document['collector_coverage'] = [{
+                'collector': 'startup-folders', 'target': 'current-user-startup',
+                'location': folder, 'status': 'scanned', 'detail': ''}]
+            document['observations'] = ([{
+                'collector': 'startup-folders', 'target': 'current-user-startup',
+                'identity': 'example.lnk', 'data': {'folder': folder}}] if present else [])
+            return document
+        old = startup(r'c:\users\one\startup')
+        for present in (False, True):
+            result = compare(old, startup(r'd:\redirected\startup', present))
+            self.assertEqual(len(result['unassessed']), 1)
+            self.assertFalse(result['removed'])
+            self.assertFalse(result['changed'])
+            self.assertEqual(len(result['newly_observed']), int(present))
+        self.assertEqual(len(compare(old, startup(r'c:\users\one\startup', False))['removed']), 1)
+
+    def test_strict_legacy_migration_does_not_invent_external_absence(self):
+        old = self.doc()
+        old['schema'] = evidence.LEGACY_SCHEMA
+        for key in ('origin_schema', 'observations', 'collector_coverage'):
+            del old[key]
+        old['scope']['collectors'] = list(evidence.LEGACY_SCOPE)
+        migrated = evidence.loads(json.dumps(old))
+        self.assertEqual(migrated['origin_schema'], evidence.LEGACY_SCHEMA)
+        self.assertTrue(all(c['status'] == 'error' for c in migrated['collector_coverage']))
+        self.assertEqual(len(compare(migrated, self.external_doc())['newly_observed']), 1)
+        old['unknown_field'] = 'not accepted'
+        with self.assertRaises(ValueError):
+            evidence.loads(json.dumps(old))
+
+    def test_external_identity_and_coverage_validation(self):
+        document = self.external_doc()
+        document['observations'].append(copy.deepcopy(document['observations'][0]))
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['observations'].pop()
+        document['collector_coverage'][0]['status'] = 'missing'
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['collector_coverage'][0]['status'] = 'error'
+        evidence.validate(document)
+        document['observations'][0]['data']['nested'] = {'unvalidated': 'object'}
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
 
     def test_size_limit(self):
         with self.assertRaises(ValueError):

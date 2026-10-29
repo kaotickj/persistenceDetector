@@ -2,7 +2,7 @@
 
 A Windows persistence **auditor**, not a malware verdict or a clean-machine certificate.
 
-## Build 0.2.0+build.2 — evidence and baseline comparison
+## Build 0.2.0+build.3 — scheduled-task and startup inventory
 
 This source build separates a cross-platform, testable collection/triage core from
 the existing Tk interface. The PyQt6 interface and wider collectors are future
@@ -26,6 +26,42 @@ is enabled, or is malicious. Startup state, signatures and file reputation are
 not evaluated. Registry views may share keys, particularly `SYSTEM`; do not treat
 results from two views as two distinct installations.
 
+### Scheduled tasks and startup folders
+
+Build 3 adds observations (not malware verdicts) beyond the registry:
+
+- **Scheduled tasks visible to the current account**: a fixed, module-qualified
+  `ScheduledTasks\Get-ScheduledTask` query records task identity, state, enabled
+  flag, principal and action metadata. Commands/arguments remain text. The system
+  PowerShell executable is resolved using `GetSystemDirectoryW`; profiles are
+  disabled, no shell is used, and module loading is restricted to system modules.
+  This is not an all-users/all-permissions guarantee. Task triggers, signatures,
+  full XML, COM-handler resolution and action execution are not included.
+- **Current-account Startup and shared Common Startup folders**: paths come from
+  `SHGetKnownFolderPath`, not guessed profile paths. Only immediate entry metadata
+  is read: name, size, modification time and kind. No recursion, file content,
+  hashing, shortcut-target resolution, scripts or executables are opened/run.
+  Reparse entries are listed as such without following them; root/ancestor
+  reparse points and network/device paths are skipped with a coverage error.
+  Shared Common Startup does not mean every user's private Startup folder.
+
+Task queries have a 20-second process timeout, 2 MiB output limit and 5,000-task
+limit. Each startup folder has a 5,000-entry limit and cooperative 20-second
+budget. Filesystem calls can block beyond that budget; metadata-only checks are
+not an atomic snapshot and cannot eliminate path-change races. Errors and partial
+reads are retained visibly, never reported as an empty successful scan. The
+transitional Tk interface still collects synchronously and may be unresponsive
+during these calls. Use **Full inventory** or JSON export for task/startup details;
+registry heuristic checkboxes do not filter these metadata collectors.
+
+Native integration is still unverified on Windows. Unsupported/blocked native
+queries produce coverage errors rather than inventing results. Fixture tests do
+not invoke live task or startup scans on the development host.
+
+Primary API references: [Get-ScheduledTask](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/get-scheduledtask),
+[SHGetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath),
+and [known folder identifiers](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
+
 ### What a finding means
 
 PowerShell-associated commands and encoded-command arguments are **review
@@ -44,7 +80,7 @@ Elevating with another account changes that scope.
 
 ### Not yet covered
 
-Scheduled tasks, startup folders, WMI subscriptions, other users' hives, Winlogon,
+WMI subscriptions, other users' hives/startup folders, Winlogon,
 IFEO, AppInit, COM/shell-extension resolution, browser extensions, boot mechanisms,
 and other persistence families are **not scanned**. The previous shallow IE and
 shell-extension probes did not resolve their subkeys/COM registrations; they have
@@ -54,10 +90,12 @@ been removed rather than presented as meaningful coverage.
 
 Deletion and `.reg` export are disabled/removed until a separately tested,
 type-correct backup and identity-bound remediation workflow exists. There is no
-registry write path, recursive retry, or command execution in the collector.
+registry write path, recursive retry, or execution of collected commands. The task
+collector runs a fixed read-only Windows PowerShell query, never task actions.
 Findings preserve the original hive, path, registry view, value name, type and data
 snapshot; changing the view selector cannot retarget an existing finding.
-No reputation/network lookup is performed by scans. Existing help/donation links
+No reputation lookup is performed by scans. Startup paths on network/device
+locations are skipped with a coverage error. The native task query runs locally. Existing help/donation links
 open a browser only when clicked.
 
 ## Run from source (Windows)
@@ -83,7 +121,7 @@ Reports may contain sensitive usernames, paths and command arguments. Choose the
 save location deliberately and review/redact before sharing. This is evidence,
 **not** a `.reg` backup or a remediation/import mechanism.
 
-Schema `persistence-detector/evidence-v1` records the build, immutable UTC scan-start
+Schema `persistence-detector/evidence-v2` records the build, immutable UTC scan-start
 timestamp, separate UTC export timestamp, informational host/account labels,
 collector/view scope, signal options, typed values, review reasons, and per-key
 coverage. Scan-start time is captured once before collection and retained across exports.
@@ -97,9 +135,15 @@ Malformed or unsupported schemas, ambiguous duplicate identities/JSON fields,
 and invalid typed data are rejected. Imported content is only parsed as JSON;
 no command, script, registry import, or path from that content is executed.
 
+Version 1 evidence is strictly migrated on import: its original registry values
+are preserved, `origin_schema` remains v1, and task/startup coverage is marked
+unassessed. An old report's lack of those collectors never implies absence. New
+exports include `observations` and `collector_coverage` alongside the original
+registry `entries` and `coverage` arrays.
+
 **Compare baseline** selects an earlier exported JSON report and compares it with
 the last scan snapshot. Comparison requires explicit confirmation that both scans
-came from the **same machine and Windows account**. Host/account labels are only
+came from the **same machine, Windows account and privilege context**. Host/account labels are only
 informational (not authenticated machine IDs or SIDs); mismatched or missing labels
 block comparison, and matching labels alone do not authorize it. Cancel if source
 continuity is uncertain. The core API also requires `same_source_confirmed=True`.
@@ -108,9 +152,13 @@ Results mean inventory differences, not malware verdicts:
 - **Added**: new identity, with successful prior coverage of its exact key.
 - **Newly observed**: present now, but prior coverage cannot establish absence.
 - **Changed**: same case-insensitive hive/path/view/value-name identity, different
-  registry type or typed data. Changed review reasons alone do not count.
+  registry type or typed data (or task/startup metadata). Changed review reasons alone do not count.
 - **Removed**: no longer observed, with successful current coverage of its exact
-  key (including an absent optional key).
+  registry key or external collector target (including an absent optional folder).
+  Startup comparison is bound to the normalized resolved folder path, not merely
+  its current-user/shared role; redirection makes old observations unassessed.
+  Tasks are never marked removed based on absence: permissions/elevation changes
+  can hide them. A newly seen task is likewise newly observed, not proven added.
 - **Unassessed**: not observed now, but relevant coverage failed, is absent, or is
   for a different registry view. Never reported as removed.
 - **Unchanged**: same observed value and type, not proof of trustworthiness.
@@ -126,7 +174,7 @@ settings or registry data. Canceling a dialog leaves the displayed result intact
 
 ```sh
 python -m unittest discover -s tests -v
-python -m py_compile persistence_core.py evidence.py detectpersist.py
+python -m py_compile persistence_core.py evidence.py external_collectors.py audit.py detectpersist.py
 ```
 
 Tests use an injected fake registry, including access denial, concurrent changes,
@@ -138,8 +186,8 @@ is introduced.
 
 ## Next milestones
 
-1. Inventory adapters for scheduled tasks, startup folders and WMI, each with
-   explicit coverage/error reporting and fixture-driven tests.
+1. WMI subscription inventory, richer task evidence and optional safe shortcut
+   analysis, each with explicit coverage/error reporting and fixture-driven tests.
 2. Additional registry persistence families and evidence enrichment, without
    claiming that absence of findings proves cleanliness.
 3. PyQt6 black/blue/white interface, background collection, background progress and richer evidence presentation.

@@ -1,12 +1,18 @@
 """Versioned JSON evidence and conservative baseline comparison (data only)."""
 import json
+import copy
 from datetime import datetime, timezone
 
 from persistence_core import BUILD
 
-SCHEMA = 'persistence-detector/evidence-v1'
+SCHEMA = 'persistence-detector/evidence-v2'
+LEGACY_SCHEMA = 'persistence-detector/evidence-v1'
 MAX_BYTES = 10 * 1024 * 1024
-SCOPE = ['current-user-and-machine-run-runonce', 'services-imagepath-servicedll']
+LEGACY_SCOPE = ['current-user-and-machine-run-runonce', 'services-imagepath-servicedll']
+SCOPE = LEGACY_SCOPE + ['scheduled-tasks', 'startup-folders']
+EXTERNAL_TARGETS = {('scheduled-tasks', 'local-visible-tasks'),
+                    ('startup-folders', 'current-user-startup'),
+                    ('startup-folders', 'common-startup')}
 
 
 def identity(value):
@@ -29,7 +35,7 @@ def _encode(data):
 
 def to_document(report):
     document = {
-        'schema': SCHEMA, 'build': BUILD,
+        'schema': SCHEMA, 'origin_schema': SCHEMA, 'build': BUILD,
         'scan_started_utc': report.scan_started_utc,
         'exported_utc': datetime.now(timezone.utc).isoformat(),
         'source': {'host_label': report.source_labels[0], 'account_label': report.source_labels[1],
@@ -37,6 +43,10 @@ def to_document(report):
         'scope': {'collectors': list(SCOPE), 'views': [report.view],
                   'signals': {'powershell': report.powershell, 'encoded': report.encoded}},
         'entries': [], 'coverage': [],
+        'observations': copy.deepcopy(report.observations),
+        'collector_coverage': copy.deepcopy(report.collector_coverage) or [
+            {'collector': c, 'target': t, 'status': 'error', 'detail': 'Collector not run', 'location': ''}
+            for c, t in sorted(EXTERNAL_TARGETS)],
     }
     reasons = {id(item.value): list(item.reasons) for item in report.findings}
     for value in report.entries:
@@ -67,7 +77,9 @@ def _strings(value, keys):
 
 def validate(document):
     """Reject malformed/ambiguous baselines rather than silently trusting them."""
-    _keys(document, ('schema', 'build', 'scan_started_utc', 'exported_utc', 'source', 'scope', 'entries', 'coverage'))
+    _keys(document, ('schema', 'origin_schema', 'build', 'scan_started_utc', 'exported_utc', 'source', 'scope', 'entries', 'coverage', 'observations', 'collector_coverage'))
+    if document['origin_schema'] not in (SCHEMA, LEGACY_SCHEMA):
+        raise ValueError('Unsupported origin schema')
     if document['schema'] != SCHEMA:
         raise ValueError('Unsupported evidence schema')
     _strings(document, ('build', 'scan_started_utc', 'exported_utc'))
@@ -92,7 +104,7 @@ def validate(document):
     _keys(scope['signals'], ('powershell', 'encoded'))
     if any(type(item) is not bool for item in scope['signals'].values()):
         raise ValueError('Invalid signal options')
-    for collection in ('entries', 'coverage'):
+    for collection in ('entries', 'coverage', 'observations', 'collector_coverage'):
         if not isinstance(document[collection], list):
             raise ValueError('Expected evidence list')
     seen = set()
@@ -150,7 +162,59 @@ def validate(document):
         status = coverage_status.get(identity(value)[:3])
         if status not in ('scanned', 'error'):
             raise ValueError('Entry contradicts missing or absent key coverage')
+    external_coverage = {}
+    external_locations = {}
+    for item in document['collector_coverage']:
+        _keys(item, ('collector', 'target', 'status', 'detail', 'location'))
+        _strings(item, ('collector', 'target', 'status', 'detail', 'location'))
+        key = (item['collector'], item['target'])
+        if key not in EXTERNAL_TARGETS or key in external_coverage:
+            raise ValueError('Unknown or duplicate external coverage')
+        if item['status'] not in ('scanned', 'missing', 'error'):
+            raise ValueError('Invalid external coverage status')
+        if item['collector'] == 'scheduled-tasks' and item['location']:
+            raise ValueError('Task coverage must not claim a filesystem location')
+        if item['collector'] == 'startup-folders' and item['status'] in ('scanned', 'missing') and not item['location']:
+            raise ValueError('Successful startup coverage requires resolved folder location')
+        external_coverage[key] = item['status']
+        external_locations[key] = item['location']
+    seen = set()
+    for item in document['observations']:
+        _keys(item, ('collector', 'target', 'identity', 'data'))
+        _strings(item, ('collector', 'target', 'identity'))
+        key = (item['collector'], item['target'])
+        if key not in EXTERNAL_TARGETS or external_coverage.get(key) not in ('scanned', 'error'):
+            raise ValueError('Observation contradicts collector coverage')
+        if item['collector'] == 'startup-folders' and not external_locations.get(key):
+            raise ValueError('Startup observation requires resolved folder location')
+        if not item['identity'] or not isinstance(item['data'], dict):
+            raise ValueError('Invalid external observation')
+        if any(not isinstance(k, str) or not (v is None or type(v) in (str, int, bool))
+               for k, v in item['data'].items()):
+            raise ValueError('External observation data must be flat JSON scalars')
+        unique = key + (item['identity'].casefold(),)
+        if unique in seen:
+            raise ValueError('Duplicate external observation identity')
+        seen.add(unique)
     return document
+
+
+def migrate(document):
+    """Strict v1 -> v2 import. New collectors stay unassessed, never empty/clean."""
+    if not isinstance(document, dict) or document.get('schema') != LEGACY_SCHEMA:
+        return document
+    _keys(document, ('schema', 'build', 'scan_started_utc', 'exported_utc', 'source',
+                     'scope', 'entries', 'coverage'))
+    _keys(document['scope'], ('collectors', 'views', 'signals'))
+    if document['scope']['collectors'] != LEGACY_SCOPE:
+        raise ValueError('Unsupported legacy collector scope')
+    migrated = copy.deepcopy(document)
+    migrated.update(schema=SCHEMA, origin_schema=LEGACY_SCHEMA, observations=[],
+                    collector_coverage=[{'collector': c, 'target': t, 'status': 'error',
+                                         'detail': 'Not collected by legacy v1 evidence', 'location': ''}
+                                        for c, t in sorted(EXTERNAL_TARGETS)])
+    migrated['scope']['collectors'] = list(SCOPE)
+    return migrated
 
 
 def dumps(document):
@@ -177,7 +241,7 @@ def loads(text):
         document = json.loads(text, object_pairs_hook=unique_pairs)
     except (json.JSONDecodeError, RecursionError) as exc:
         raise ValueError('Malformed evidence JSON') from exc
-    return validate(document)
+    return validate(migrate(document))
 
 
 def compare(baseline, current, same_source_confirmed=False):
@@ -216,4 +280,37 @@ def compare(baseline, current, same_source_confirmed=False):
     for key, value in old.items():
         if key not in new:
             result['removed' if key[:3] in new_coverage else 'unassessed'].append(value)
+    def locations(doc):
+        return {(c['collector'], c['target']): c['location'].casefold()
+                for c in doc['collector_coverage']}
+
+    old_locations, new_locations = locations(baseline), locations(current)
+
+    def observation_key(item, resolved):
+        scope = (item['collector'], item['target'])
+        return scope + (resolved.get(scope, ''), item['identity'].casefold())
+
+    old_observations = {observation_key(v, old_locations): v for v in baseline['observations']}
+    new_observations = {observation_key(v, new_locations): v for v in current['observations']}
+
+    def comparable_coverage(doc):
+        # A successful visible-task query does not prove visibility continuity:
+        # ACL/elevation changes can hide tasks even for the same account.
+        return {(c['collector'], c['target'], c['location'].casefold())
+                for c in doc['collector_coverage']
+                if c['collector'] == 'startup-folders' and c['location']
+                and c['status'] in ('scanned', 'missing')}
+
+    old_external_coverage = comparable_coverage(baseline)
+    new_external_coverage = comparable_coverage(current)
+    for key, value in new_observations.items():
+        if key not in old_observations:
+            result['added' if key[:3] in old_external_coverage else 'newly_observed'].append(value)
+        elif value['data'] != old_observations[key]['data']:
+            result['changed'].append({'before': old_observations[key], 'after': value})
+        else:
+            result['unchanged'].append(value)
+    for key, value in old_observations.items():
+        if key not in new_observations:
+            result['removed' if key[:3] in new_external_coverage else 'unassessed'].append(value)
     return result

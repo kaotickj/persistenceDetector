@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
-BUILD = "0.2.0+build.2"
+BUILD = "0.2.0+build.3"
 RUN_PATHS = (
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
@@ -69,6 +69,8 @@ class ScanReport:
     entries: List[RegistryValue] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)
     coverage: List[Coverage] = field(default_factory=list)
+    observations: List[dict] = field(default_factory=list)
+    collector_coverage: List[dict] = field(default_factory=list)
 
     @property
     def errors(self):

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from test_persistence_core import FakeRegistry
-from persistence_core import RUN_PATHS
+from persistence_core import RUN_PATHS, scan_registry
 
 
 class Text:
@@ -45,6 +45,7 @@ class GuiAdapterTests(unittest.TestCase):
                 'detector_test_adapter', Path(__file__).resolve().parents[1] / 'detectpersist.py')
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
+        self.module.scan_audit = scan_registry  # Never invoke live task/filesystem collectors.
         self.app = self.module.RegistryCheckerApp.__new__(self.module.RegistryCheckerApp)
         self.app.output_text = Text()
         self.app.combo_box = Combo()
@@ -116,7 +117,7 @@ class GuiAdapterTests(unittest.TestCase):
         self.app.check_registry()
         self.assertEqual(self.app.output_text.content.count('COVERAGE ERROR'), 5)
         self.assertIn('PowerShell=False, encoded=False', self.app.output_text.content)
-        self.assertIn('Inventoried 0 values', self.app.output_text.content)
+        self.assertIn('Inventoried 0 registry values', self.app.output_text.content)
         self.assertIn('Scan incomplete', self.app.output_text.content)
 
     def test_error_is_visible_and_removal_stays_read_only(self):
