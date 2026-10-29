@@ -25,7 +25,7 @@ class EvidenceTests(unittest.TestCase):
                              ('integer', 42, 4), ('command', 'pwsh -enc !!!', 2)])
         self.assertEqual(evidence.loads(evidence.dumps(document)), document)
         self.assertEqual(document['schema'], evidence.SCHEMA)
-        self.assertEqual(document['build'], '0.2.0+build.3')
+        self.assertEqual(document['build'], '0.2.0+build.4')
         self.assertEqual(document['entries'][0]['data'], {'kind': 'bytes', 'value': '00ff'})
         self.assertEqual(len(document['entries'][3]['reasons']), 2)
 
@@ -229,6 +229,63 @@ class EvidenceTests(unittest.TestCase):
         old['unknown_field'] = 'not accepted'
         with self.assertRaises(ValueError):
             evidence.loads(json.dumps(old))
+
+    def test_v2_migration_preserves_old_evidence_and_marks_wmi_unknown(self):
+        old = self.external_doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        migrated = evidence.loads(json.dumps(old))
+        self.assertEqual(migrated['observations'], old['observations'])
+        wmi = [c for c in migrated['collector_coverage'] if c['collector'] == 'wmi-subscriptions']
+        self.assertEqual(wmi[0]['status'], 'error')
+        self.assertEqual(migrated['origin_schema'], evidence.V2_SCHEMA)
+        old['observations'][0]['collector'] = 'wmi-subscriptions'
+        with self.assertRaises(ValueError):
+            evidence.loads(json.dumps(old))
+
+    def test_malformed_v2_target_is_value_error_not_unhandled_type_error(self):
+        old = self.external_doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        for invalid in ([], {}, None, 123):
+            old['collector_coverage'][0]['target'] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                evidence.loads(json.dumps(old))
+
+    def test_legacy_registry_coverage_does_not_invent_winlogon_absence(self):
+        from persistence_core import WINLOGON_PATH, IFEO_PATH
+        old = self.doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        old['coverage'] = [c for c in old['coverage'] if c['path'] not in (WINLOGON_PATH, IFEO_PATH)]
+        old['collector_coverage'] = [c for c in old['collector_coverage'] if c['collector'] != 'wmi-subscriptions']
+        migrated = evidence.loads(json.dumps(old))
+        current = self.doc()
+        current['entries'].append({'hive': 'HKEY_LOCAL_MACHINE', 'path': WINLOGON_PATH,
+            'view': '64-bit', 'name': 'Shell', 'value_type': 1, 'category': 'Winlogon',
+            'data': {'kind': 'string', 'value': 'explorer.exe'}, 'reasons': []})
+        for item in current['coverage']:
+            if item['hive'] == 'HKEY_LOCAL_MACHINE' and item['path'] == WINLOGON_PATH:
+                item['status'] = 'scanned'
+        result = compare(migrated, current)
+        self.assertEqual(len(result['newly_observed']), 1)
+        self.assertFalse(result['added'])
+
+    def test_wmi_disappearance_is_unassessed_even_with_successful_query(self):
+        old = self.doc()
+        old['observations'] = [{'collector': 'wmi-subscriptions', 'target': 'root/subscription',
+                                'identity': 'consumer:example', 'data': {'ScriptText': 'data only'}}]
+        old['collector_coverage'] = [{'collector': 'wmi-subscriptions', 'target': 'root/subscription',
+                                     'status': 'scanned', 'detail': '', 'location': ''}]
+        new = copy.deepcopy(old)
+        new['observations'] = []
+        result = compare(old, new)
+        self.assertEqual(len(result['unassessed']), 1)
+        self.assertFalse(result['removed'])
+        self.assertEqual(len(compare(new, old)['newly_observed']), 1)
 
     def test_external_identity_and_coverage_validation(self):
         document = self.external_doc()

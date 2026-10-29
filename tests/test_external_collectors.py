@@ -90,6 +90,89 @@ class TasksTests(unittest.TestCase):
                 self.assertTrue(killed)
 
 
+def wmi_row(class_name='__EventFilter', name='Example'):
+    return {'ClassName': class_name, 'RelativePath': class_name + '.Name="' + name + '"',
+            'Query': 'SELECT * FROM ExampleEvent', 'EventNamespace': 'root/cimv2',
+            'CommandLineTemplate': 'NEVER EXECUTE THIS', 'ExecutablePath': 'untrusted.exe',
+            'ScriptText': 'untrusted script text', 'ScriptFileName': '',
+            'ScriptingEngine': 'VBScript', 'Filter': '__EventFilter.Name="Example"',
+            'Consumer': 'ActiveScriptEventConsumer.Name="Example"', 'Properties': '{}'}
+
+
+class WmiTests(unittest.TestCase):
+    def test_filter_consumer_subclass_and_binding_are_inert_evidence(self):
+        rows = [wmi_row(), wmi_row('ActiveScriptEventConsumer'), wmi_row('__FilterToConsumerBinding')]
+        report = external.collect_wmi(lambda: json.dumps(rows))
+        self.assertEqual(len(report['observations']), 3)
+        self.assertEqual(report['observations'][1]['data']['ScriptText'], 'untrusted script text')
+        self.assertEqual(report['observations'][1]['collector'], 'wmi-subscriptions')
+        self.assertEqual(report['observations'][1]['target'], 'root/subscription')
+        self.assertEqual(report['collector_coverage'][0]['status'], 'scanned')
+        self.assertEqual(report['collector_coverage'][0]['location'], '')
+        self.assertIn('other namespaces unassessed', report['collector_coverage'][0]['detail'])
+
+    def test_wmi_errors_duplicates_and_partial_evidence(self):
+        def denied():
+            raise PermissionError('denied')
+        self.assertEqual(external.collect_wmi(denied)['collector_coverage'][0]['status'], 'error')
+        bad = wmi_row()
+        bad['RelativePath'] = ''
+        for raw in ('bad json', '{}', json.dumps([bad]),
+                    json.dumps([wmi_row(), wmi_row()]), '[{"ClassName":1,"ClassName":2}]'):
+            with self.subTest(raw=raw):
+                self.assertEqual(external.collect_wmi(lambda: raw)['collector_coverage'][0]['status'], 'error')
+        partial = external.collect_wmi(lambda: json.dumps([wmi_row(), bad]))
+        self.assertEqual(len(partial['observations']), 1)
+        self.assertEqual(partial['collector_coverage'][0]['status'], 'error')
+
+    def test_wmi_empty_and_item_output_limits(self):
+        self.assertEqual(external.collect_wmi(lambda: '[]')['observations'], [])
+        with patch.object(external, 'MAX_OUTPUT', 8):
+            self.assertEqual(external.collect_wmi(lambda: ' ' * 9)['collector_coverage'][0]['status'], 'error')
+        with patch.object(external, 'MAX_ITEMS', 1):
+            report = external.collect_wmi(lambda: json.dumps([wmi_row(name='A'), wmi_row(name='B')]))
+            self.assertEqual(report['collector_coverage'][0]['status'], 'error')
+
+    def test_only_fixed_queries_can_reach_process_launcher(self):
+        with patch.object(external.subprocess, 'Popen') as popen, self.assertRaises(ValueError):
+            external.run_fixed_query('Invoke-Expression untrusted')
+        popen.assert_not_called()
+        with patch.object(external, 'run_fixed_query', return_value='[]') as runner:
+            self.assertEqual(external.run_wmi_query(), '[]')
+        runner.assert_called_once_with(external.WMI_QUERY, external.TIMEOUT, external.MAX_OUTPUT)
+        self.assertIn('CimCmdlets\\Get-CimInstance', external.WMI_QUERY)
+        # No command capable of starting the inventoried consumer is in the query.
+        for command in ('Invoke-Expression', 'Invoke-CimMethod', 'Register-CimIndicationEvent',
+                        'New-CimInstance', 'Set-CimInstance', 'Remove-CimInstance'):
+            self.assertNotIn(command, external.WMI_QUERY)
+        self.assertIn("@('__EventFilter', '__EventConsumer', '__FilterToConsumerBinding')", external.WMI_QUERY)
+
+    def test_wmi_reference_provenance_is_preserved_without_dereferencing(self):
+        # Static guard for the Windows-only query, plus inert fixture round-trip.
+        self.assertIn('$instance.CimSystemProperties.ServerName', external.WMI_QUERY)
+        self.assertIn('$instance.CimSystemProperties.Namespace', external.WMI_QUERY)
+        self.assertIn('$v = Get-ReferencePath $p.Value ($depth + 1)', external.WMI_QUERY)
+        self.assertIn('$properties[$p.Name] = Get-ReferencePath $p.Value', external.WMI_QUERY)
+        self.assertIn("$namespace = '<unspecified>'", external.WMI_QUERY)
+        first = wmi_row('__FilterToConsumerBinding', 'one')
+        second = wmi_row('__FilterToConsumerBinding', 'two')
+        first['Filter'] = r'\\host\root\subscription:__EventFilter.Name="same"'
+        second['Filter'] = r'\\host\root\other:__EventFilter.Name="same"'
+        report = external.collect_wmi(lambda: json.dumps([first, second]))
+        self.assertEqual(report['collector_coverage'][0]['status'], 'scanned')
+        self.assertNotEqual(report['observations'][0]['data']['Filter'], report['observations'][1]['data']['Filter'])
+        self.assertTrue(all(value['target'] == 'root/subscription' for value in report['observations']))
+
+    def test_collect_external_uses_injected_wmi_runner(self):
+        blank = {'observations': [], 'collector_coverage': []}
+        with patch.object(external, 'collect_startup', return_value=blank):
+            result = external.collect_external(task_runner=lambda: '[]',
+                                               folder_resolver=lambda target: '/unused',
+                                               wmi_runner=lambda: json.dumps([wmi_row()]))
+        self.assertEqual(len(result['observations']), 1)
+        self.assertEqual(len(result['collector_coverage']), 2)
+
+
 class StartupTests(unittest.TestCase):
     def test_known_folder_ids_match_microsoft_documented_startup_folders(self):
         self.assertEqual(external.FOLDERS['current-user-startup'], 'B97D20BB-F46A-4C97-BA10-5E3608430854')

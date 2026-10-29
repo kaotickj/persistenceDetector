@@ -21,7 +21,7 @@ FOLDERS = {
     'current-user-startup': 'B97D20BB-F46A-4C97-BA10-5E3608430854',
     'common-startup': '82A5EA35-D9CD-47C5-9629-E15D2F714E6E',
 }
-# This constant is the only query code passed to PowerShell. No values obtained
+# Only the fixed TASK_QUERY and WMI_QUERY constants may be passed to PowerShell. No values obtained
 # from a task, baseline, filename or GUI control are interpolated into it.
 TASK_QUERY = r'''
 $ErrorActionPreference = 'Stop'
@@ -44,6 +44,78 @@ ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 4 -Compress
 '''
 
 
+WMI_TARGET = 'root/subscription'
+WMI_QUERY = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+function Get-RelativePath($instance, [int]$depth = 0) {
+    if ($depth -gt 4) { throw 'WMI reference nesting limit exceeded' }
+    $class = [string]$instance.CimSystemProperties.ClassName
+    $keys = @($instance.CimInstanceProperties | Where-Object {
+        ($_.Flags -band [Microsoft.Management.Infrastructure.CimFlags]::Key) -ne 0
+    } | Sort-Object Name)
+    if (-not $class -or $keys.Count -eq 0) { throw 'WMI instance has no stable key identity' }
+    $parts = @($keys | ForEach-Object {
+        $p = $_
+        if ($null -eq $p.Value) { throw 'WMI key value is missing' }
+        if ([string]$p.CimType -eq 'Reference') {
+            $v = Get-ReferencePath $p.Value ($depth + 1)
+            $v = '"' + $v.Replace('\', '\\').Replace('"', '\"') + '"'
+        } elseif ([string]$p.CimType -eq 'String') {
+            $v = '"' + ([string]$p.Value).Replace('\', '\\').Replace('"', '\"') + '"'
+        } elseif ([string]$p.CimType -eq 'Boolean') {
+            $v = ([string]$p.Value).ToUpperInvariant()
+        } elseif ([string]$p.CimType -match '^(SInt|UInt)(8|16|32|64)$') {
+            $v = [Convert]::ToString($p.Value, [Globalization.CultureInfo]::InvariantCulture)
+        } else { throw 'Unsupported WMI key type' }
+        ([string]$p.Name) + '=' + $v
+    })
+    return $class + '.' + ($parts -join ',')
+}
+function Get-ReferencePath($instance, [int]$depth = 0) {
+    # Preserve reference provenance without following the reference or querying
+    # its namespace/server. Missing fields remain explicit, not silently local.
+    $relative = Get-RelativePath $instance $depth
+    $server = [string]$instance.CimSystemProperties.ServerName
+    $namespace = [string]$instance.CimSystemProperties.Namespace
+    if (-not $server) { $server = '<unspecified>' }
+    if (-not $namespace) { $namespace = '<unspecified>' }
+    return '\\' + $server + '\' + $namespace.Replace('/', '\') + ':' + $relative
+}
+$rows = New-Object System.Collections.Generic.List[object]
+foreach ($class in @('__EventFilter', '__EventConsumer', '__FilterToConsumerBinding')) {
+    # No -Shallow: include subclasses, especially concrete event consumers.
+    CimCmdlets\Get-CimInstance -Namespace 'root/subscription' -ClassName $class -OperationTimeoutSec 15 -ErrorAction Stop | ForEach-Object {
+        if ($rows.Count -ge 5000) { throw 'WMI enumeration exceeds 5000 item limit' }
+        $o = $_
+        $properties = [ordered]@{}
+        foreach ($p in @($o.CimInstanceProperties | Sort-Object Name)) {
+            if ([string]$p.CimType -eq 'Reference' -and $null -ne $p.Value) {
+                $properties[$p.Name] = Get-ReferencePath $p.Value
+            } elseif ($p.Value -is [Array]) {
+                $properties[$p.Name] = ConvertTo-Json -InputObject $p.Value -Depth 3 -Compress
+            } elseif ($null -eq $p.Value) {
+                $properties[$p.Name] = $null
+            } else {
+                $properties[$p.Name] = [string]$p.Value
+            }
+        }
+        $rows.Add([ordered]@{
+            ClassName=[string]$o.CimSystemProperties.ClassName;
+            RelativePath=Get-RelativePath $o;
+            Query=[string]$o.Query; EventNamespace=[string]$o.EventNamespace;
+            CommandLineTemplate=[string]$o.CommandLineTemplate; ExecutablePath=[string]$o.ExecutablePath;
+            ScriptText=[string]$o.ScriptText; ScriptFileName=[string]$o.ScriptFileName;
+            ScriptingEngine=[string]$o.ScriptingEngine;
+            Filter=[string]$properties['Filter']; Consumer=[string]$properties['Consumer'];
+            Properties=ConvertTo-Json -InputObject $properties -Depth 4 -Compress
+        })
+    }
+}
+ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 4 -Compress
+'''
+
+
 def _system_directory():
     if os.name != 'nt':
         raise OSError('Windows native collector unavailable on this platform')
@@ -57,15 +129,17 @@ def _system_directory():
     return buffer.value
 
 
-def run_task_query(timeout=TIMEOUT, max_output=MAX_OUTPUT):
-    """Run only the fixed native inventory query, with process/output bounds."""
+def run_fixed_query(query, timeout=TIMEOUT, max_output=MAX_OUTPUT):
+    """Allow only built-in read-only queries, with process/output bounds."""
+    if query not in (TASK_QUERY, WMI_QUERY):
+        raise ValueError("Only built-in inventory query constants are allowed")
     home = os.path.join(_system_directory(), 'WindowsPowerShell', 'v1.0')
     executable = os.path.join(home, 'powershell.exe')
     environment = dict(os.environ)
     # Do not auto-load a user-supplied ScheduledTasks module.
     environment['PSModulePath'] = os.path.join(home, 'Modules')
     process = subprocess.Popen(
-        [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', TASK_QUERY],
+        [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', query],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         shell=False, env=environment, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     chunks = []
@@ -80,7 +154,7 @@ def run_task_query(timeout=TIMEOUT, max_output=MAX_OUTPUT):
                     break
                 size += len(block)
                 if size > max_output:
-                    errors.append('Task query exceeds output limit')
+                    errors.append('Inventory query exceeds output limit')
                     process.kill()
                     break
                 chunks.append(block)
@@ -97,25 +171,33 @@ def run_task_query(timeout=TIMEOUT, max_output=MAX_OUTPUT):
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-        raise OSError('Task query timed out') from exc
+        raise OSError('Inventory query timed out') from exc
     finally:
         reader.join(timeout=2)
         if not reader.is_alive():
             process.stdout.close()
     if reader.is_alive():
-        raise OSError('Task query output reader did not finish')
+        raise OSError('Inventory query output reader did not finish')
     if errors:
         raise OSError(errors[0])
     if process.returncode:
-        raise OSError('Task query failed (exit {}); coverage unknown'.format(process.returncode))
+        raise OSError('Inventory query failed (exit {}); coverage unknown'.format(process.returncode))
     return b''.join(chunks).decode('utf-8-sig')
+
+
+def run_task_query(timeout=TIMEOUT, max_output=MAX_OUTPUT):
+    return run_fixed_query(TASK_QUERY, timeout, max_output)
+
+
+def run_wmi_query(timeout=TIMEOUT, max_output=MAX_OUTPUT):
+    return run_fixed_query(WMI_QUERY, timeout, max_output)
 
 
 def _unique_pairs(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError('Duplicate task JSON field')
+            raise ValueError('Duplicate inventory JSON field')
         result[key] = value
     return result
 
@@ -149,6 +231,40 @@ def collect_tasks(runner=run_task_query):
         status, detail = 'error', str(exc)
     return {'observations': observations, 'collector_coverage': [
         {'collector': 'scheduled-tasks', 'target': TASK_TARGET, 'location': '', 'status': status, 'detail': detail}]}
+
+
+def collect_wmi(runner=run_wmi_query):
+    """Inventory permanent-subscription objects; never invoke a consumer."""
+    observations = []
+    status = 'scanned'
+    detail = 'Only visible root/subscription filters, consumers and bindings; other namespaces unassessed'
+    try:
+        raw = runner()
+        if not isinstance(raw, str) or len(raw.encode('utf-8')) > MAX_OUTPUT:
+            raise ValueError('WMI query output exceeds limit or is not text')
+        rows = json.loads(raw, object_pairs_hook=_unique_pairs)
+        if not isinstance(rows, list) or len(rows) > MAX_ITEMS:
+            raise ValueError('Invalid WMI list or item count limit exceeded')
+        expected = {'ClassName', 'RelativePath', 'Query', 'EventNamespace',
+                    'CommandLineTemplate', 'ExecutablePath', 'ScriptText', 'ScriptFileName',
+                    'ScriptingEngine', 'Filter', 'Consumer', 'Properties'}
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != expected or any(not isinstance(v, str) for v in row.values()):
+                raise ValueError('Invalid WMI fields')
+            if not row['ClassName'] or not row['RelativePath'].startswith(row['ClassName'] + '.'):
+                raise ValueError('Invalid WMI stable identity')
+            identity = row['ClassName'] + ':' + row['RelativePath']
+            if identity.casefold() in seen:
+                raise ValueError('Duplicate WMI identity')
+            seen.add(identity.casefold())
+            observations.append({'collector': 'wmi-subscriptions', 'target': WMI_TARGET,
+                                 'identity': identity, 'data': dict(row)})
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        status, detail = 'error', str(exc)
+    return {'observations': observations, 'collector_coverage': [
+        {'collector': 'wmi-subscriptions', 'target': WMI_TARGET, 'location': '',
+         'status': status, 'detail': detail}]}
 
 
 def known_startup_folder(target):
@@ -243,7 +359,9 @@ def collect_startup(resolver=known_startup_folder, scandir=os.scandir, lstat=os.
     return {'observations': observations, 'collector_coverage': coverage}
 
 
-def collect_external(task_runner=run_task_query, folder_resolver=known_startup_folder):
+def collect_external(task_runner=run_task_query, folder_resolver=known_startup_folder,
+                     wmi_runner=run_wmi_query):
     tasks = collect_tasks(task_runner)
     startup = collect_startup(folder_resolver)
-    return {key: tasks[key] + startup[key] for key in ('observations', 'collector_coverage')}
+    wmi = collect_wmi(wmi_runner)
+    return {key: tasks[key] + startup[key] + wmi[key] for key in ('observations', 'collector_coverage')}

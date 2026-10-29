@@ -271,11 +271,11 @@ class RegistryCheckerApp:
         self.output_text.insert(tk.END,
             f"Build {BUILD} — read-only; view: {self.registry_view_var.get()}\n"
             f"Signals enabled: PowerShell={bool(self.powershell_var.get())}, encoded={bool(self.encoded_var.get())}\n"
-            f"Inventoried {len(report.entries)} registry values, {len(report.observations)} task/startup observations; {len(report.findings)} registry review indicators.\n"
+            f"Inventoried {len(report.entries)} registry values, {len(report.observations)} task/startup/WMI observations; {len(report.findings)} registry review indicators.\n"
             "Indicators are not proof of malware. Nothing found does not mean clean.\n"
-            "Coverage: current-user/machine Run and RunOnce; service/driver ImagePath and ServiceDll.\n"
-            "Also inventorying visible scheduled tasks and current-account/common startup folders.\n"
-            "NOT scanned: WMI, other user startup folders/hives, COM and other persistence.\n\n"
+            "Coverage: current-user/machine Run and RunOnce; service/driver paths; Winlogon Shell/Userinit and direct IFEO values.\n"
+            "Also inventorying visible scheduled tasks, current-account/common startup folders and root/subscription WMI.\n"
+            "NOT scanned: other WMI namespaces, other user startup folders/hives, IFEO filters, COM and other persistence.\n\n"
         )
         for finding in self.findings:
             value = finding.value
@@ -294,7 +294,7 @@ class RegistryCheckerApp:
             self.output_text.insert(tk.END,
                 f"{item['collector']} / {item['target']}: {item['status']} — {item['detail']}\n")
         if any(item['status'] == 'error' for item in report.collector_coverage):
-            self.output_text.insert(tk.END, "Task/startup inventory incomplete; review coverage errors.\n")
+            self.output_text.insert(tk.END, "Task/startup/WMI inventory incomplete; review coverage errors.\n")
         missing = sum(item.status == "missing" for item in report.coverage)
         self.output_text.insert(tk.END,
             f"\nCoverage: {len(report.errors)} errors; {missing} absent optional locations.\n"

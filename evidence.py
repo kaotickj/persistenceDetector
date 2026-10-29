@@ -5,14 +5,16 @@ from datetime import datetime, timezone
 
 from persistence_core import BUILD
 
-SCHEMA = 'persistence-detector/evidence-v2'
+SCHEMA = 'persistence-detector/evidence-v3'
+V2_SCHEMA = 'persistence-detector/evidence-v2'
 LEGACY_SCHEMA = 'persistence-detector/evidence-v1'
 MAX_BYTES = 10 * 1024 * 1024
 LEGACY_SCOPE = ['current-user-and-machine-run-runonce', 'services-imagepath-servicedll']
-SCOPE = LEGACY_SCOPE + ['scheduled-tasks', 'startup-folders']
+V2_SCOPE = LEGACY_SCOPE + ['scheduled-tasks', 'startup-folders']
+SCOPE = V2_SCOPE + ['winlogon-ifeo', 'wmi-subscriptions']
 EXTERNAL_TARGETS = {('scheduled-tasks', 'local-visible-tasks'),
                     ('startup-folders', 'current-user-startup'),
-                    ('startup-folders', 'common-startup')}
+                    ('startup-folders', 'common-startup'), ('wmi-subscriptions', 'root/subscription')}
 
 
 def identity(value):
@@ -78,7 +80,7 @@ def _strings(value, keys):
 def validate(document):
     """Reject malformed/ambiguous baselines rather than silently trusting them."""
     _keys(document, ('schema', 'origin_schema', 'build', 'scan_started_utc', 'exported_utc', 'source', 'scope', 'entries', 'coverage', 'observations', 'collector_coverage'))
-    if document['origin_schema'] not in (SCHEMA, LEGACY_SCHEMA):
+    if document['origin_schema'] not in (SCHEMA, V2_SCHEMA, LEGACY_SCHEMA):
         raise ValueError('Unsupported origin schema')
     if document['schema'] != SCHEMA:
         raise ValueError('Unsupported evidence schema')
@@ -172,7 +174,7 @@ def validate(document):
             raise ValueError('Unknown or duplicate external coverage')
         if item['status'] not in ('scanned', 'missing', 'error'):
             raise ValueError('Invalid external coverage status')
-        if item['collector'] == 'scheduled-tasks' and item['location']:
+        if item['collector'] in ('scheduled-tasks', 'wmi-subscriptions') and item['location']:
             raise ValueError('Task coverage must not claim a filesystem location')
         if item['collector'] == 'startup-folders' and item['status'] in ('scanned', 'missing') and not item['location']:
             raise ValueError('Successful startup coverage requires resolved folder location')
@@ -200,19 +202,44 @@ def validate(document):
 
 
 def migrate(document):
-    """Strict v1 -> v2 import. New collectors stay unassessed, never empty/clean."""
-    if not isinstance(document, dict) or document.get('schema') != LEGACY_SCHEMA:
+    """Strict v1/v2 -> v3 import; absent new collectors remain unassessed."""
+    if not isinstance(document, dict):
         return document
-    _keys(document, ('schema', 'build', 'scan_started_utc', 'exported_utc', 'source',
-                     'scope', 'entries', 'coverage'))
+    schema = document.get('schema')
+    if schema not in (LEGACY_SCHEMA, V2_SCHEMA):
+        return document
+    fields = ('schema', 'build', 'scan_started_utc', 'exported_utc', 'source',
+              'scope', 'entries', 'coverage')
+    if schema == V2_SCHEMA:
+        fields += ('origin_schema', 'observations', 'collector_coverage')
+    _keys(document, fields)
     _keys(document['scope'], ('collectors', 'views', 'signals'))
-    if document['scope']['collectors'] != LEGACY_SCOPE:
+    expected_scope = LEGACY_SCOPE if schema == LEGACY_SCHEMA else V2_SCOPE
+    if document['scope']['collectors'] != expected_scope:
         raise ValueError('Unsupported legacy collector scope')
     migrated = copy.deepcopy(document)
-    migrated.update(schema=SCHEMA, origin_schema=LEGACY_SCHEMA, observations=[],
-                    collector_coverage=[{'collector': c, 'target': t, 'status': 'error',
-                                         'detail': 'Not collected by legacy v1 evidence', 'location': ''}
-                                        for c, t in sorted(EXTERNAL_TARGETS)])
+    migrated['schema'] = SCHEMA
+    if schema == LEGACY_SCHEMA:
+        migrated.update(origin_schema=LEGACY_SCHEMA, observations=[], collector_coverage=[])
+    elif migrated['origin_schema'] not in (LEGACY_SCHEMA, V2_SCHEMA):
+        raise ValueError('Unsupported legacy origin schema')
+    if not isinstance(migrated['collector_coverage'], list):
+        raise ValueError('Invalid legacy collector coverage')
+    if schema == V2_SCHEMA:
+        for item in migrated['collector_coverage']:
+            _keys(item, ('collector', 'target', 'status', 'detail', 'location'))
+            _strings(item, ('collector', 'target', 'status', 'detail', 'location'))
+            if item['collector'] not in ('scheduled-tasks', 'startup-folders'):
+                raise ValueError('Unsupported legacy collector')
+        if not isinstance(migrated['observations'], list) or any(
+                not isinstance(item, dict) or item.get('collector') not in ('scheduled-tasks', 'startup-folders')
+                for item in migrated['observations']):
+            raise ValueError('Unsupported legacy observations')
+    existing = {(item.get('collector'), item.get('target')) for item in migrated['collector_coverage']}
+    for collector, target in sorted(EXTERNAL_TARGETS - existing):
+        migrated['collector_coverage'].append({
+            'collector': collector, 'target': target, 'status': 'error', 'location': '',
+            'detail': 'Not collected by legacy evidence'})
     migrated['scope']['collectors'] = list(SCOPE)
     return migrated
 

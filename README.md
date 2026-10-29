@@ -2,7 +2,7 @@
 
 A Windows persistence **auditor**, not a malware verdict or a clean-machine certificate.
 
-## Build 0.2.0+build.3 — scheduled-task and startup inventory
+## Build 0.2.0+build.4 — WMI and registry coverage expansion
 
 This source build separates a cross-platform, testable collection/triage core from
 the existing Tk interface. The PyQt6 interface and wider collectors are future
@@ -17,6 +17,11 @@ For the selected 32-bit or 64-bit registry view:
 - HKLM `System\CurrentControlSet\Services\<service>` `ImagePath` values,
   including driver registrations.
 - `Services\<service>\Parameters` `ServiceDll` values.
+- HKLM `Software\Microsoft\Windows NT\CurrentVersion\Winlogon` `Shell` and
+  `Userinit`, plus HKCU Winlogon `Shell`.
+- HKLM `Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options`
+  immediate per-image children: `Debugger`, `GlobalFlag`, and `UseFilter` only.
+  Per-filter descendant keys and SilentProcessExit are **not** traversed.
 
 All these values are inventoried in the core report. The GUI lists review
 indicators, inventory counts, and coverage errors. **Full inventory** displays all
@@ -62,6 +67,34 @@ Primary API references: [Get-ScheduledTask](https://learn.microsoft.com/en-us/po
 [SHGetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath),
 and [known folder identifiers](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
 
+### WMI permanent subscription inventory
+
+Build 4 queries only `root/subscription` for `__EventFilter`, `__EventConsumer`
+(including subclasses), and `__FilterToConsumerBinding` using a fixed read-only
+CIM query. It records class/object identity, filter query/namespace, consumer
+command or script fields, and binding references as inert text. It never invokes
+consumer methods, resolves referenced objects, evaluates scripts, or modifies
+subscriptions. A listed object does not establish a functioning subscription;
+filters, consumers and bindings may be unpaired or legitimate.
+
+The query uses the same trusted native PowerShell runner as tasks, with a
+20-second timeout, 2 MiB output limit and 5,000-object cap. Unsupported namespace,
+access denial, malformed output or truncation/limits are coverage errors. Only
+objects visible to the current querying account are in scope. Other namespaces
+can host subscriptions and are **not scanned**. Visibility can change with ACLs
+or elevation, so baseline disappearance is always **unassessed**, not removal.
+
+Registry values and immediate service/IFEO subkeys are bounded to 5,000 per
+location/traversal with cooperative 20-second budgets and duplicate detection.
+Partial evidence survives enumeration errors. Blocking native registry calls
+cannot be interrupted by the cooperative clock; this is not a global scan-time
+promise. Winlogon or IFEO presence is inventory, not itself a malicious verdict.
+`UseFilter` is recorded to expose that additional unscanned filtering may exist.
+
+Primary references: [WMI permanent event consumers](https://learn.microsoft.com/en-us/windows/win32/wmisdk/monitoring-events),
+[Winlogon values](https://learn.microsoft.com/en-us/troubleshoot/windows-server/user-profiles-and-logon/cannot-log-on-windows),
+and [IFEO debugger configuration](https://techcommunity.microsoft.com/blog/askperf/two-minute-drill-configuring-a-debugger-using-image-file-execution-options/373478).
+
 ### What a finding means
 
 PowerShell-associated commands and encoded-command arguments are **review
@@ -80,8 +113,8 @@ Elevating with another account changes that scope.
 
 ### Not yet covered
 
-WMI subscriptions, other users' hives/startup folders, Winlogon,
-IFEO, AppInit, COM/shell-extension resolution, browser extensions, boot mechanisms,
+WMI namespaces other than `root/subscription`, other users' hives/startup folders,
+IFEO filter descendants, SilentProcessExit, AppInit, COM/shell-extension resolution, browser extensions, boot mechanisms,
 and other persistence families are **not scanned**. The previous shallow IE and
 shell-extension probes did not resolve their subkeys/COM registrations; they have
 been removed rather than presented as meaningful coverage.
@@ -91,7 +124,8 @@ been removed rather than presented as meaningful coverage.
 Deletion and `.reg` export are disabled/removed until a separately tested,
 type-correct backup and identity-bound remediation workflow exists. There is no
 registry write path, recursive retry, or execution of collected commands. The task
-collector runs a fixed read-only Windows PowerShell query, never task actions.
+collectors run fixed read-only Windows PowerShell queries, never task actions
+or WMI consumer content.
 Findings preserve the original hive, path, registry view, value name, type and data
 snapshot; changing the view selector cannot retarget an existing finding.
 No reputation lookup is performed by scans. Startup paths on network/device
@@ -121,7 +155,7 @@ Reports may contain sensitive usernames, paths and command arguments. Choose the
 save location deliberately and review/redact before sharing. This is evidence,
 **not** a `.reg` backup or a remediation/import mechanism.
 
-Schema `persistence-detector/evidence-v2` records the build, immutable UTC scan-start
+Schema `persistence-detector/evidence-v3` records the build, immutable UTC scan-start
 timestamp, separate UTC export timestamp, informational host/account labels,
 collector/view scope, signal options, typed values, review reasons, and per-key
 coverage. Scan-start time is captured once before collection and retained across exports.
@@ -135,10 +169,10 @@ Malformed or unsupported schemas, ambiguous duplicate identities/JSON fields,
 and invalid typed data are rejected. Imported content is only parsed as JSON;
 no command, script, registry import, or path from that content is executed.
 
-Version 1 evidence is strictly migrated on import: its original registry values
-are preserved, `origin_schema` remains v1, and task/startup coverage is marked
-unassessed. An old report's lack of those collectors never implies absence. New
-exports include `observations` and `collector_coverage` alongside the original
+Version 1 and 2 evidence are strictly migrated on import: its original registry values
+are preserved, `origin_schema` preserves its original version, and collectors missing from that
+version remain unassessed. No synthetic successful Winlogon/IFEO key coverage is
+created; older snapshots cannot establish prior absence there. An old report's lack of those collectors never implies absence. Exports include `observations` and `collector_coverage` alongside the original
 registry `entries` and `coverage` arrays.
 
 **Compare baseline** selects an earlier exported JSON report and compares it with
@@ -152,13 +186,13 @@ Results mean inventory differences, not malware verdicts:
 - **Added**: new identity, with successful prior coverage of its exact key.
 - **Newly observed**: present now, but prior coverage cannot establish absence.
 - **Changed**: same case-insensitive hive/path/view/value-name identity, different
-  registry type or typed data (or task/startup metadata). Changed review reasons alone do not count.
+  registry type or typed data (or task/startup/WMI metadata). Changed review reasons alone do not count.
 - **Removed**: no longer observed, with successful current coverage of its exact
   registry key or external collector target (including an absent optional folder).
   Startup comparison is bound to the normalized resolved folder path, not merely
   its current-user/shared role; redirection makes old observations unassessed.
-  Tasks are never marked removed based on absence: permissions/elevation changes
-  can hide them. A newly seen task is likewise newly observed, not proven added.
+  Tasks and WMI observations are never marked removed based on absence: permissions/elevation changes
+  can hide them. A newly seen task or WMI observation is likewise newly observed, not proven added.
 - **Unassessed**: not observed now, but relevant coverage failed, is absent, or is
   for a different registry view. Never reported as removed.
 - **Unchanged**: same observed value and type, not proof of trustworthiness.
@@ -186,8 +220,8 @@ is introduced.
 
 ## Next milestones
 
-1. WMI subscription inventory, richer task evidence and optional safe shortcut
-   analysis, each with explicit coverage/error reporting and fixture-driven tests.
+1. Richer task/trigger evidence, additional WMI namespaces where justified, and
+   optional safe shortcut analysis with explicit coverage and fixture-driven tests.
 2. Additional registry persistence families and evidence enrichment, without
    claiming that absence of findings proves cleanliness.
 3. PyQt6 black/blue/white interface, background collection, background progress and richer evidence presentation.

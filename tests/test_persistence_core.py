@@ -95,8 +95,8 @@ class CollectionTests(unittest.TestCase):
     def test_missing_optional_locations_and_required_root_error(self):
         self.reg.locations.clear()
         report = scan_registry(self.reg)
-        self.assertEqual(len(report.coverage), 5)
-        self.assertEqual(sum(item.status == 'missing' for item in report.coverage), 4)
+        self.assertEqual(len(report.coverage), 8)
+        self.assertEqual(sum(item.status == 'missing' for item in report.coverage), 7)
         self.assertFalse(report.findings)
         self.assertEqual(len(report.errors), 1)
 
