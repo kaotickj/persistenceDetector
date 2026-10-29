@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['detectpersist.py'],
+    ['persistence_gui.py'],
     pathex=[],
     binaries=[],
     datas=[],

@@ -25,7 +25,7 @@ class EvidenceTests(unittest.TestCase):
                              ('integer', 42, 4), ('command', 'pwsh -enc !!!', 2)])
         self.assertEqual(evidence.loads(evidence.dumps(document)), document)
         self.assertEqual(document['schema'], evidence.SCHEMA)
-        self.assertEqual(document['build'], '0.2.0+build.4')
+        self.assertEqual(document['build'], '0.2.0+build.5')
         self.assertEqual(document['entries'][0]['data'], {'kind': 'bytes', 'value': '00ff'})
         self.assertEqual(len(document['entries'][3]['reasons']), 2)
 

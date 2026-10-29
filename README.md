@@ -2,11 +2,12 @@
 
 A Windows persistence **auditor**, not a malware verdict or a clean-machine certificate.
 
-## Build 0.2.0+build.4 — WMI and registry coverage expansion
+## Build 0.2.0+build.5 — PyQt6 audit workspace
 
 This source build separates a cross-platform, testable collection/triage core from
-the existing Tk interface. The PyQt6 interface and wider collectors are future
-work, not features delivered by this build. Existing executables in `dist/` are
+a new PyQt6 interface. A black/blue/white audit workspace provides background
+collection, full inventory filtering, detail inspection, coverage review and
+evidence controls. The original Tk interface remains available as a legacy fallback. Existing executables in `dist/` are
 **older builds** and do not contain these safety changes. Run the source instead.
 
 ### What is collected
@@ -24,8 +25,8 @@ For the selected 32-bit or 64-bit registry view:
   Per-filter descendant keys and SilentProcessExit are **not** traversed.
 
 All these values are inventoried in the core report. The GUI lists review
-indicators, inventory counts, and coverage errors. **Full inventory** displays all
-collected values plus coverage in a structured JSON view.
+indicators, inventory counts, and coverage errors. The Qt inventory table displays all collected
+values with structured details; the Coverage tab lists assessed locations.
 A collected service/driver registration does **not** establish that it runs at boot,
 is enabled, or is malicious. Startup state, signatures and file reputation are
 not evaluated. Registry views may share keys, particularly `SYSTEM`; do not treat
@@ -54,9 +55,8 @@ Task queries have a 20-second process timeout, 2 MiB output limit and 5,000-task
 limit. Each startup folder has a 5,000-entry limit and cooperative 20-second
 budget. Filesystem calls can block beyond that budget; metadata-only checks are
 not an atomic snapshot and cannot eliminate path-change races. Errors and partial
-reads are retained visibly, never reported as an empty successful scan. The
-transitional Tk interface still collects synchronously and may be unresponsive
-during these calls. Use **Full inventory** or JSON export for task/startup details;
+reads are retained visibly, never reported as an empty successful scan. The default Qt interface keeps collection off the UI thread; the legacy Tk
+interface still collects synchronously. Use the inventory table/detail pane or JSON export for task/startup details;
 registry heuristic checkboxes do not filter these metadata collectors.
 
 Native integration is still unverified on Windows. Unsupported/blocked native
@@ -134,19 +134,45 @@ open a browser only when clicked.
 
 ## Run from source (Windows)
 
-Use a fresh Python 3.7+ environment with Tkinter; no third-party packages needed.
-Do not use the historical checked-in virtual environment directories.
+Use Python 3.10+ and a fresh virtual environment for the default PyQt6 GUI.
+The audit core remains standard-library-only. Do not use the historical
+checked-in virtual environment directories.
 
 ```sh
 git clone https://github.com/kaotickj/persistenceDetector.git
 cd persistenceDetector
-python detectpersist.py
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-gui.txt
+.venv\Scripts\python persistence_gui.py
 ```
 
-Choose the view and enabled signals, then click **Check Registry**. On 64-bit
-Windows inspect both views separately. On 32-bit Windows select 32-bit. Results
-replace the prior scan; collection is synchronous in this transitional Tk GUI.
+Choose the view and enabled registry signals, then click **Start audit**. On 64-bit
+Windows inspect both views separately. On 32-bit Windows select 32-bit. Successful results
+replace the prior snapshot. The scan timestamp and scope belong to that snapshot,
+not to later selector changes.
 Use least privilege first; unreadable keys remain explicitly unassessed.
+
+## Qt interface and cancellation
+
+The default `persistence_gui.py` entrypoint provides a searchable inventory and
+plain-text detail pane, separate coverage inspection, JSON export and baseline
+comparison. It is read-only: no remediation button or imported content execution.
+
+Only one worker runs at a time. Controls cannot start overlapping scans or export
+an unfinished snapshot. Progress reports actual collector stages, not fabricated
+percentages. **Cancel** requests cooperative cancellation: the current collector
+may finish first, then later collectors are skipped and the unfinished snapshot
+is discarded. The previous completed snapshot remains clearly identified. Native
+process timeouts are bounded, but blocked filesystem/registry calls may take
+longer; cancel is not an immediate kill or guaranteed deadline.
+
+Closing during a scan requests cancellation and defers window destruction until
+the worker actually finishes. Repeated close/scan requests do not destroy a
+running Qt thread. Failed scans also retain the prior snapshot. No new executable
+has been built; `detectpersist.spec` now targets the Qt entrypoint for future
+Windows packaging. Legacy `python detectpersist.py` requires Tkinter and remains
+synchronous. Non-Windows native collection is unsupported; offscreen UI tests use
+only injected fixture results.
 
 ## JSON evidence and baselines
 
@@ -208,8 +234,13 @@ settings or registry data. Canceling a dialog leaves the displayed result intact
 
 ```sh
 python -m unittest discover -s tests -v
-python -m py_compile persistence_core.py evidence.py external_collectors.py audit.py detectpersist.py
+python -m py_compile persistence_core.py evidence.py external_collectors.py audit.py detectpersist.py persistence_gui.py
 ```
+
+To include offscreen GUI tests, install `requirements-gui.txt` in an isolated
+environment and run the same unittest command with `QT_QPA_PLATFORM=offscreen`
+(on Windows PowerShell, set `$env:QT_QPA_PLATFORM="offscreen"` first). Without Qt,
+GUI tests are explicitly skipped rather than reported as passing.
 
 Tests use an injected fake registry, including access denial, concurrent changes,
 subkey traversal, registry-view identity, strict encoding checks, and read-only
@@ -224,7 +255,7 @@ is introduced.
    optional safe shortcut analysis with explicit coverage and fixture-driven tests.
 2. Additional registry persistence families and evidence enrichment, without
    claiming that absence of findings proves cleanliness.
-3. PyQt6 black/blue/white interface, background collection, background progress and richer evidence presentation.
+3. Further UI refinement and evidence enrichment based on Windows validation.
 4. Windows VM integration and packaging. Remediation remains separately gated.
 
 Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md) and the

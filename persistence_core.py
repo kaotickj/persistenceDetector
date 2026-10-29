@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
-BUILD = "0.2.0+build.4"
+BUILD = "0.2.0+build.5"
 RUN_PATHS = (
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
