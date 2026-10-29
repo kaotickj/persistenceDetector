@@ -3,12 +3,11 @@
 import tkinter.font as tkFont
 import tkinter as tk
 from tkinter import messagebox
-import tkinter.filedialog as filedialog
+from tkinter import filedialog
+import evidence
 import winreg
-import base64
-import re
-import string
-from datetime import datetime
+from persistence_core import BUILD
+from audit import scan_audit
 import webbrowser
 from tkinter import ttk
 import sys
@@ -34,9 +33,9 @@ def run_as_admin():
 
 class RegistryCheckerApp:
     def __init__(self, root):
-        root.title("Registry Persistence Detector")
+        root.title(f"Persistence Detector — {BUILD} (read-only)")
         width = 600
-        height = 450
+        height = 550
         screenwidth = root.winfo_screenwidth()
         screenheight = root.winfo_screenheight()
         alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth - width) / 2, (screenheight - height) / 2)
@@ -74,7 +73,7 @@ class RegistryCheckerApp:
         check_button["font"] = ft
         check_button["fg"] = "#000000"
         check_button["justify"] = "center"
-        check_button["text"] = "Check Registry"
+        check_button["text"] = "Scan"
         check_button.place(x=240, y=340, width=110, height=25)
         check_button["command"] = self.check_registry
 
@@ -126,11 +125,21 @@ class RegistryCheckerApp:
         delete_button["font"] = ft
         delete_button["fg"] = "#000000"
         delete_button["justify"] = "center"
-        delete_button["text"] = "Delete Selected"
+        delete_button["text"] = "Read-only"
+        delete_button["state"] = "disabled"
         delete_button.place(x=420, y=380, width=110, height=25)
         delete_button["command"] = self.delete_selected_key
 
-        self.malicious_entries = []
+        self.findings = []
+        self.scan_report = None
+        for x, title, command in (
+            (10, "Full inventory", self.show_inventory),
+            (200, "Export JSON", self.export_evidence),
+            (390, "Compare baseline", self.compare_baseline),
+        ):
+            tk.Button(root, text=title, command=command).place(x=x, y=425, width=180, height=28)
+        tk.Label(root, text="JSON reports contain sensitive local paths and commands. Share carefully.").place(
+            x=10, y=465, width=574, height=25)
 
         # Notify user of privilege level on startup
         if is_user_admin():
@@ -161,15 +170,15 @@ class RegistryCheckerApp:
             instruction_win,
             text=(
                 "USAGE INSTRUCTIONS:\n\n"
-                "1. Click 'Check Registry' to scan for suspicious entries.\n"
+                "1. Click 'Scan' to scan for suspicious entries.\n"
                 "2. Check or uncheck options for encoded payloads and PowerShell detection.\n"
                 "3. Select 'Registry View' from the dropdown:\n"
                 "   - On 32-bit systems: Only '32-bit' is needed and used.\n"
                 "   - On 64-bit systems: Run a 32-bit scan first, then switch to 64-bit view and scan again.\n"
                 "     This is necessary because 64-bit Windows maintains separate registry views for 32-bit\n"
                 "     and 64-bit applications. Both may be used by malware to achieve persistence.\n\n"
-                "4. Results will be shown in the output panel. If malicious entries are detected,\n"
-                "   you may delete them after optionally backing up the value.\n\n"
+                "4. Review indicators and coverage errors in the output panel.\n"
+                "   This build is read-only. Findings are not proof of malware.\n\n"
                 "For guidance on analyzing the results and removing other types of persistence beyond the scope of this tool,"
                 " please consult my comprehensive guide:"
             ),
@@ -214,7 +223,7 @@ class RegistryCheckerApp:
         close_btn.pack(pady=(10, 10))
 
     def show_help(self):
-        messagebox.showinfo("Help", "To use this application, simply click the 'Check Registry' button to detect any malicious registry persistence.")
+        messagebox.showinfo("Help", "Click 'Scan' to inventory selected registry locations and review indicators. This read-only scan cannot prove a machine clean; inspect coverage errors and unimplemented collectors.")
 
     def show_donate_dialog(self):
         donate_win = tk.Toplevel()
@@ -248,198 +257,148 @@ class RegistryCheckerApp:
 
     def check_registry(self):
         self.output_text.delete(1.0, tk.END)
-        self.output_text.insert(tk.END,
-            f"Scan for Powershell Commands {'Enabled' if self.powershell_var.get() else 'Disabled'}\n"
-            f"Scan for Encoded Payloads {'Enabled' if self.encoded_var.get() else 'Disabled'}\n\n"
+        self.combo_box.set('')
+        self.combo_box["values"] = []
+        self.findings = []
+        self.scan_report = None
+        report = scan_audit(
+            winreg, view=self.registry_view_var.get(),
+            powershell=bool(self.powershell_var.get()),
+            encoded=bool(self.encoded_var.get()),
         )
-        self.malicious_entries = self.get_malicious_entries()
-        if self.malicious_entries:
-            self.output_text.insert(tk.END, "Malicious registry persistence detected:\n\n")
-            for entry in self.malicious_entries:
-                self.output_text.insert(tk.END, f"Location: {entry[1]}, Name: {entry[2]}, Data: {entry[3]}\n\n")
-
-            display_items = [
-                f"{[k for k, v in winreg.__dict__.items() if v == e[0] and k.startswith('HKEY_')][0]}\\{e[1]} → {e[2]}"
-                for e in self.malicious_entries
-            ]
-            self.combo_box["values"] = display_items
-            if display_items:
-                self.combo_box.current(0)
-
-            messagebox.showwarning("Alert",
-                "Malicious registry persistence detected. Please review the output.\n"
-                "You may select a key from the dropdown and delete it safely.\n"
-                "Backup is prompted before deletion."
+        self.scan_report = report
+        self.findings = report.findings
+        self.output_text.insert(tk.END,
+            f"Build {BUILD} — read-only; view: {self.registry_view_var.get()}\n"
+            f"Signals enabled: PowerShell={bool(self.powershell_var.get())}, encoded={bool(self.encoded_var.get())}\n"
+            f"Inventoried {len(report.entries)} registry values, {len(report.observations)} task/startup/WMI observations; {len(report.findings)} registry review indicators.\n"
+            "Indicators are not proof of malware. Nothing found does not mean clean.\n"
+            "Coverage: current-user/machine Run and RunOnce; service/driver paths; Winlogon Shell/Userinit and direct IFEO values.\n"
+            "Also inventorying visible scheduled tasks, current-account/common startup folders and root/subscription WMI.\n"
+            "NOT scanned: other WMI namespaces, other user startup folders/hives, IFEO filters, COM and other persistence.\n\n"
+        )
+        for finding in self.findings:
+            value = finding.value
+            self.output_text.insert(tk.END,
+                f"[{value.view}] {value.hive}\\{value.path}\n"
+                f"Name: {value.name!r}; type: {value.value_type}; data: {value.data!r}\n"
+                + "\n".join(f"  Review: {reason}" for reason in finding.reasons) + "\n\n"
             )
-        else:
-            self.output_text.insert(tk.END, "No malicious registry persistence found.\n")
-            self.combo_box.set('')
-            self.combo_box["values"] = []
-
-    def get_malicious_entries(self):
-        view_flag = winreg.KEY_READ
-        selected_view = self.registry_view_var.get()
-        if selected_view == "32-bit":
-            view_flag |= winreg.KEY_WOW64_32KEY
-        else:
-            view_flag |= winreg.KEY_WOW64_64KEY
-
-        persistence_locations = [
-            (winreg.HKEY_CURRENT_USER, [
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
-                r"Software\Microsoft\Internet Explorer\Extensions",
-            ]),
-            (winreg.HKEY_LOCAL_MACHINE, [
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
-                r"System\CurrentControlSet\Services",
-                r"Software\Microsoft\Internet Explorer\Extensions",
-            ]),
-            (winreg.HKEY_CLASSES_ROOT, [
-                r"Directory\Background\ShellEx\ContextMenuHandlers",
-            ]),
-            (winreg.HKEY_USERS, [
-                r"S-1-5-18\Software\Microsoft\Windows\CurrentVersion\Run",
-                r"S-1-5-19\Software\Microsoft\Windows\CurrentVersion\Run",
-            ]),
+        if not self.findings:
+            self.output_text.insert(tk.END, "No indicators found in the locations and options scanned.\n")
+        for item in report.coverage:
+            if item.status == "error":
+                self.output_text.insert(tk.END,
+                    f"COVERAGE ERROR [{item.view}] {item.hive}\\{item.path}: {item.detail}\n")
+        for item in report.collector_coverage:
+            self.output_text.insert(tk.END,
+                f"{item['collector']} / {item['target']}: {item['status']} — {item['detail']}\n")
+        if any(item['status'] == 'error' for item in report.collector_coverage):
+            self.output_text.insert(tk.END, "Task/startup/WMI inventory incomplete; review coverage errors.\n")
+        missing = sum(item.status == "missing" for item in report.coverage)
+        self.output_text.insert(tk.END,
+            f"\nCoverage: {len(report.errors)} errors; {missing} absent optional locations.\n"
+            "Scan incomplete within selected scope.\n" if report.errors else
+            f"\nCoverage: no reported read errors; {missing} absent optional locations.\n"
+        )
+        display_items = [
+            f"[{f.value.view}] {f.value.hive}\\{f.value.path} → {f.value.name}"
+            for f in self.findings
         ]
+        self.combo_box["values"] = display_items
+        if display_items:
+            self.combo_box.current(0)
 
-        malicious_entries = []
-
-        for root_key, locations in persistence_locations:
-            for location in locations:
-                try:
-                    with winreg.OpenKey(root_key, location, 0, view_flag) as key:
-                        num_values = winreg.QueryInfoKey(key)[1]
-                        for i in range(num_values):
-                            value_name, value_data, _ = winreg.EnumValue(key, i)
-                            if self.is_malicious(value_name, value_data):
-                                malicious_entries.append((root_key, location, value_name, value_data))
-                except Exception as e:
-                    print(f"Error accessing registry location {location}: {e}")
-
-        return malicious_entries
-
-    def is_malicious(self, value_name, value_data):
-        # Basic keyword check first
-        if re.search(r"malware|virus|trojan|keylogger", str(value_name), re.IGNORECASE) or \
-           re.search(r"malware|virus|trojan|keylogger", str(value_data), re.IGNORECASE):
-            return True
-
-        # Check encoded payload only if option enabled
-        if self.encoded_var.get():
-            if self.is_base64_encoded(str(value_data)):
-                return True
-
-        # Check powershell commands only if option enabled
-        if self.powershell_var.get():
-            if self.is_powershell_command(str(value_data)):
-                return True
-
-        return False
-
-    def is_powershell_command(self, data):
-        return bool(re.search(r"powershell|-enc", data, re.IGNORECASE))
-
-    def is_base64_encoded(self, data):
+    def _document(self):
+        if self.scan_report is None:
+            messagebox.showinfo("Scan first", "Run a registry scan before viewing or exporting evidence.")
+            return None
         try:
-            decoded_data = base64.b64decode(data)
-            return all(chr(byte) in string.printable for byte in decoded_data)
-        except Exception:
-            return False
+            return evidence.to_document(self.scan_report)
+        except ValueError as exc:
+            messagebox.showerror("Invalid scan evidence", str(exc))
+            return None
+
+    def show_inventory(self):
+        document = self._document()
+        if document is None:
+            return
+        try:
+            content = evidence.dumps(document)
+        except ValueError as exc:
+            messagebox.showerror("Inventory too large", str(exc))
+            return
+        self.output_text.delete(1.0, tk.END)
+        self.output_text.insert(tk.END, "FULL INVENTORY — observations, not malware verdicts.\n")
+        self.output_text.insert(tk.END, content)
+
+    def export_evidence(self):
+        try:
+            document = self._document()
+            if document is None:
+                return
+            content = evidence.dumps(document)
+            path = filedialog.asksaveasfilename(
+                title="Export evidence (may contain sensitive paths/commands)",
+                defaultextension=".json", filetypes=[("JSON evidence", "*.json")])
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(content)
+            messagebox.showinfo("Exported", "JSON evidence saved. This is not a restorable registry backup.")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export failed", str(exc))
+
+    def compare_baseline(self):
+        try:
+            current = self._document()
+            if current is None:
+                return
+            path = filedialog.askopenfilename(
+                title="Select a previous JSON evidence report", filetypes=[("JSON evidence", "*.json")])
+            if not path:
+                return
+            with open(path, "rb") as stream:
+                raw = stream.read(evidence.MAX_BYTES + 1)
+            if len(raw) > evidence.MAX_BYTES:
+                raise ValueError("Evidence exceeds 10 MiB limit")
+            baseline = evidence.loads(raw.decode("utf-8"))
+            source = baseline['source']
+            if not messagebox.askyesno(
+                    "Confirm evidence source",
+                    f"Baseline: host {source['host_label']!r}, account {source['account_label']!r}.\n"
+                    f"Baseline scan: {baseline['scan_started_utc']}\n"
+                    f"Current scan: {current['scan_started_utc']}\n\n"
+                    "Labels are not authenticated identifiers. Can you confirm both scans came "
+                    "from the SAME machine, SAME Windows account, and SAME privilege context? Otherwise cancel; "
+                    "changes cannot be reliably attributed."):
+                return
+            changes = evidence.compare(baseline, current, same_source_confirmed=True)
+            self.output_text.delete(1.0, tk.END)
+            self.output_text.insert(tk.END,
+                "BASELINE COMPARISON — registry changes are not malware verdicts.\n"
+                "Unassessed means current coverage could not establish absence.\n"
+                "Newly observed means baseline coverage could not establish prior absence.\n"
+                "Comparison uses the last scan snapshot, not a fresh scan.\n\n")
+            for status, items in changes.items():
+                self.output_text.insert(tk.END, f"{status}: {len(items)}\n")
+                if status == "unchanged":
+                    continue
+                for item in items:
+                    value = item['after'] if status == 'changed' else item
+                    if "collector" in value:
+                        self.output_text.insert(tk.END,
+                            f"  {value['collector']} / {value['target']} → {value['identity']!r}\n")
+                        continue
+                    self.output_text.insert(tk.END,
+                        f"  [{value['view']}] {value['hive']}\\{value['path']} → {value['name']!r}\n")
+        except (OSError, ValueError, UnicodeError) as exc:
+            messagebox.showerror("Baseline comparison failed", str(exc))
 
     def delete_selected_key(self):
-        idx = self.combo_box.current()
-        if idx < 0:
-            messagebox.showinfo("No Selection", "Please select an entry to delete.")
-            return
+        # Deliberately no write API, backup serializer, or recursive retry.
+        messagebox.showinfo("Read-only build", "Remediation is disabled. Review findings manually; legitimate entries may be flagged.")
 
-        root_handle, path, name, data = self.malicious_entries[idx]
-
-        backup = messagebox.askyesno("Backup Registry Value", f"Do you want to backup the registry value '{name}' before deletion?")
-        if backup:
-            export_path = filedialog.asksaveasfilename(
-                title="Save Registry Backup",
-                defaultextension=".reg",
-                filetypes=[("Registry files", "*.reg"), ("All files", "*.*")]
-            )
-            if not export_path:
-                messagebox.showinfo("Backup Cancelled", "Backup cancelled. Deletion aborted.")
-                return
-
-            success = self.export_registry_value(root_handle, path, name, export_path)
-            if not success:
-                return
-
-        view_flag = winreg.KEY_SET_VALUE
-        if self.registry_view_var.get() == "32-bit":
-            view_flag |= winreg.KEY_WOW64_32KEY
-        else:
-            view_flag |= winreg.KEY_WOW64_64KEY
-
-        try:
-            with winreg.OpenKey(root_handle, path, 0, view_flag) as key:
-                winreg.DeleteValue(key, name)
-
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.output_text.insert(tk.END, f"[{timestamp}] Deleted: {name} from {path}\n")
-
-            del self.malicious_entries[idx]
-
-            if self.malicious_entries:
-                display_items = [
-                    f"{[k for k, v in winreg.__dict__.items() if v == e[0] and k.startswith('HKEY_')][0]}\\{e[1]} → {e[2]}"
-                    for e in self.malicious_entries
-                ]
-                self.combo_box["values"] = display_items
-                self.combo_box.current(0)
-            else:
-                self.output_text.insert(tk.END, "\nAll malicious registry entries removed. Rechecking...\n")
-                self.check_registry()
-
-        except PermissionError:
-            messagebox.showerror("Error", "Permission denied. Please run as Administrator.")
-        except FileNotFoundError:
-            self.output_text.insert(tk.END, f"Entry '{name}' already removed.\n")
-            del self.malicious_entries[idx]
-            self.delete_selected_key()
-        except Exception as e:
-            messagebox.showerror("Error", f"Unexpected error: {e}")
-
-    def export_registry_value(self, root_handle, key_path, value_name, export_path):
-        try:
-            view_flag = winreg.KEY_READ
-            if self.registry_view_var.get() == "32-bit":
-                view_flag |= winreg.KEY_WOW64_32KEY
-            else:
-                view_flag |= winreg.KEY_WOW64_64KEY
-
-            with winreg.OpenKey(root_handle, key_path, 0, view_flag) as key:
-                value, val_type = winreg.QueryValueEx(key, value_name)
-
-            hive_name = [k for k, v in winreg.__dict__.items() if v == root_handle and k.startswith("HKEY_")][0]
-
-            reg_content = "Windows Registry Editor Version 5.00\n\n"
-            reg_content += f"[{hive_name}\\{key_path}]\n"
-
-            if val_type == winreg.REG_SZ:
-                reg_content += f"\"{value_name}\"=\"{value}\"\n"
-            elif val_type == winreg.REG_EXPAND_SZ:
-                reg_content += f"\"{value_name}\"=hex(2):" + ",".join(f"{b:02x}" for b in value.encode('utf-16le')) + "\n"
-            elif val_type == winreg.REG_DWORD:
-                reg_content += f"\"{value_name}\"=dword:{value:08x}\n"
-            elif val_type == winreg.REG_BINARY:
-                reg_content += f"\"{value_name}\"=hex:" + ",".join(f"{b:02x}" for b in value) + "\n"
-            else:
-                reg_content += f"\"{value_name}\"=hex:" + ",".join(f"{b:02x}" for b in value) + "\n"
-
-            with open(export_path, "w", encoding="utf-8") as f:
-                f.write(reg_content)
-            return True
-        except Exception as e:
-            messagebox.showerror("Backup Error", f"Failed to backup registry value:\n{e}")
-            return False
 
 if __name__ == "__main__":
     root = tk.Tk()

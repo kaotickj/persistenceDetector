@@ -1,57 +1,262 @@
-# Registry Persistence Detector
-![GitHub License](https://img.shields.io/github/license/kaotickj/persistenceDetector) ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/kaotickj/persistenceDetector) ![GitHub top language](https://img.shields.io/github/languages/top/kaotickj/persistenceDetector)
+# Persistence Detector
 
-![Logo](/screen.png)
+A Windows persistence **auditor**, not a malware verdict or a clean-machine certificate.
 
-> A Python program to detect malicious registry persistence entries in the Windows Registry.
+## Build 0.2.0+build.5 — PyQt6 audit workspace
 
-## Dependencies
+This source build separates a cross-platform, testable collection/triage core from
+a new PyQt6 interface. A black/blue/white audit workspace provides background
+collection, full inventory filtering, detail inspection, coverage review and
+evidence controls. The original Tk interface remains available as a legacy fallback. Existing executables in `dist/` are
+**older builds** and do not contain these safety changes. Run the source instead.
 
-- Python 3.7+
-- tkinter (usually included in standard Python installations)
+### What is collected
 
-## Installation
+For the selected 32-bit or 64-bit registry view:
 
-1. Clone the repository:
+- HKCU and HKLM `Software\Microsoft\Windows\CurrentVersion\Run` and `RunOnce` values.
+- HKLM `System\CurrentControlSet\Services\<service>` `ImagePath` values,
+  including driver registrations.
+- `Services\<service>\Parameters` `ServiceDll` values.
+- HKLM `Software\Microsoft\Windows NT\CurrentVersion\Winlogon` `Shell` and
+  `Userinit`, plus HKCU Winlogon `Shell`.
+- HKLM `Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options`
+  immediate per-image children: `Debugger`, `GlobalFlag`, and `UseFilter` only.
+  Per-filter descendant keys and SilentProcessExit are **not** traversed.
+
+All these values are inventoried in the core report. The GUI lists review
+indicators, inventory counts, and coverage errors. The Qt inventory table displays all collected
+values with structured details; the Coverage tab lists assessed locations.
+A collected service/driver registration does **not** establish that it runs at boot,
+is enabled, or is malicious. Startup state, signatures and file reputation are
+not evaluated. Registry views may share keys, particularly `SYSTEM`; do not treat
+results from two views as two distinct installations.
+
+### Scheduled tasks and startup folders
+
+Build 3 adds observations (not malware verdicts) beyond the registry:
+
+- **Scheduled tasks visible to the current account**: a fixed, module-qualified
+  `ScheduledTasks\Get-ScheduledTask` query records task identity, state, enabled
+  flag, principal and action metadata. Commands/arguments remain text. The system
+  PowerShell executable is resolved using `GetSystemDirectoryW`; profiles are
+  disabled, no shell is used, and module loading is restricted to system modules.
+  This is not an all-users/all-permissions guarantee. Task triggers, signatures,
+  full XML, COM-handler resolution and action execution are not included.
+- **Current-account Startup and shared Common Startup folders**: paths come from
+  `SHGetKnownFolderPath`, not guessed profile paths. Only immediate entry metadata
+  is read: name, size, modification time and kind. No recursion, file content,
+  hashing, shortcut-target resolution, scripts or executables are opened/run.
+  Reparse entries are listed as such without following them; root/ancestor
+  reparse points and network/device paths are skipped with a coverage error.
+  Shared Common Startup does not mean every user's private Startup folder.
+
+Task queries have a 20-second process timeout, 2 MiB output limit and 5,000-task
+limit. Each startup folder has a 5,000-entry limit and cooperative 20-second
+budget. Filesystem calls can block beyond that budget; metadata-only checks are
+not an atomic snapshot and cannot eliminate path-change races. Errors and partial
+reads are retained visibly, never reported as an empty successful scan. The default Qt interface keeps collection off the UI thread; the legacy Tk
+interface still collects synchronously. Use the inventory table/detail pane or JSON export for task/startup details;
+registry heuristic checkboxes do not filter these metadata collectors.
+
+Native integration is still unverified on Windows. Unsupported/blocked native
+queries produce coverage errors rather than inventing results. Fixture tests do
+not invoke live task or startup scans on the development host.
+
+Primary API references: [Get-ScheduledTask](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/get-scheduledtask),
+[SHGetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath),
+and [known folder identifiers](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
+
+### WMI permanent subscription inventory
+
+Build 4 queries only `root/subscription` for `__EventFilter`, `__EventConsumer`
+(including subclasses), and `__FilterToConsumerBinding` using a fixed read-only
+CIM query. It records class/object identity, filter query/namespace, consumer
+command or script fields, and binding references as inert text. It never invokes
+consumer methods, resolves referenced objects, evaluates scripts, or modifies
+subscriptions. A listed object does not establish a functioning subscription;
+filters, consumers and bindings may be unpaired or legitimate.
+
+The query uses the same trusted native PowerShell runner as tasks, with a
+20-second timeout, 2 MiB output limit and 5,000-object cap. Unsupported namespace,
+access denial, malformed output or truncation/limits are coverage errors. Only
+objects visible to the current querying account are in scope. Other namespaces
+can host subscriptions and are **not scanned**. Visibility can change with ACLs
+or elevation, so baseline disappearance is always **unassessed**, not removal.
+
+Registry values and immediate service/IFEO subkeys are bounded to 5,000 per
+location/traversal with cooperative 20-second budgets and duplicate detection.
+Partial evidence survives enumeration errors. Blocking native registry calls
+cannot be interrupted by the cooperative clock; this is not a global scan-time
+promise. Winlogon or IFEO presence is inventory, not itself a malicious verdict.
+`UseFilter` is recorded to expose that additional unscanned filtering may exist.
+
+Primary references: [WMI permanent event consumers](https://learn.microsoft.com/en-us/windows/win32/wmisdk/monitoring-events),
+[Winlogon values](https://learn.microsoft.com/en-us/troubleshoot/windows-server/user-profiles-and-logon/cannot-log-on-windows),
+and [IFEO debugger configuration](https://techcommunity.microsoft.com/blog/askperf/two-minute-drill-configuring-a-debugger-using-image-file-execution-options/373478).
+
+### What a finding means
+
+PowerShell-associated commands and encoded-command arguments are **review
+signals**. Legitimate software and administrators use them. Generic printable
+Base64, words such as “virus,” and unrelated `-enc` substrings are no longer
+classified as malware. Strict, bounded UTF-16LE Base64 inspection never executes
+the decoded content. This lightweight string heuristic is not a full Windows
+command-line parser and can miss obfuscation or flag benign references.
+
+No indicators found means only that no enabled indicators matched in locations
+successfully read. It does not prove a machine clean. Turning both options off
+still collects inventory, but produces no heuristic findings. Permission and
+mid-enumeration errors are shown as coverage errors; absent optional keys are
+counted separately. HKCU means the account running the process, not all users.
+Elevating with another account changes that scope.
+
+### Not yet covered
+
+WMI namespaces other than `root/subscription`, other users' hives/startup folders,
+IFEO filter descendants, SilentProcessExit, AppInit, COM/shell-extension resolution, browser extensions, boot mechanisms,
+and other persistence families are **not scanned**. The previous shallow IE and
+shell-extension probes did not resolve their subkeys/COM registrations; they have
+been removed rather than presented as meaningful coverage.
+
+### Safety changes
+
+Deletion and `.reg` export are disabled/removed until a separately tested,
+type-correct backup and identity-bound remediation workflow exists. There is no
+registry write path, recursive retry, or execution of collected commands. The task
+collectors run fixed read-only Windows PowerShell queries, never task actions
+or WMI consumer content.
+Findings preserve the original hive, path, registry view, value name, type and data
+snapshot; changing the view selector cannot retarget an existing finding.
+No reputation lookup is performed by scans. Startup paths on network/device
+locations are skipped with a coverage error. The native task query runs locally. Existing help/donation links
+open a browser only when clicked.
+
+## Run from source (Windows)
+
+Use Python 3.10+ and a fresh virtual environment for the default PyQt6 GUI.
+The audit core remains standard-library-only. Do not use the historical
+checked-in virtual environment directories.
+
 ```sh
 git clone https://github.com/kaotickj/persistenceDetector.git
-```
-
-2. Change directory to the project folder:
-
-```sh
 cd persistenceDetector
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-gui.txt
+.venv\Scripts\python persistence_gui.py
 ```
-3. Run the Python script:
+
+Choose the view and enabled registry signals, then click **Start audit**. On 64-bit
+Windows inspect both views separately. On 32-bit Windows select 32-bit. Successful results
+replace the prior snapshot. The scan timestamp and scope belong to that snapshot,
+not to later selector changes.
+Use least privilege first; unreadable keys remain explicitly unassessed.
+
+## Qt interface and cancellation
+
+The default `persistence_gui.py` entrypoint provides a searchable inventory and
+plain-text detail pane, separate coverage inspection, JSON export and baseline
+comparison. It is read-only: no remediation button or imported content execution.
+
+Only one worker runs at a time. Controls cannot start overlapping scans or export
+an unfinished snapshot. Progress reports actual collector stages, not fabricated
+percentages. **Cancel** requests cooperative cancellation: the current collector
+may finish first, then later collectors are skipped and the unfinished snapshot
+is discarded. The previous completed snapshot remains clearly identified. Native
+process timeouts are bounded, but blocked filesystem/registry calls may take
+longer; cancel is not an immediate kill or guaranteed deadline.
+
+Closing during a scan requests cancellation and defers window destruction until
+the worker actually finishes. Repeated close/scan requests do not destroy a
+running Qt thread. Failed scans also retain the prior snapshot. No new executable
+has been built; `detectpersist.spec` now targets the Qt entrypoint for future
+Windows packaging. Legacy `python detectpersist.py` requires Tkinter and remains
+synchronous. Non-Windows native collection is unsupported; offscreen UI tests use
+only injected fixture results.
+
+## JSON evidence and baselines
+
+After scanning, **Export JSON** saves the current snapshot (not a fresh scan).
+Reports may contain sensitive usernames, paths and command arguments. Choose the
+save location deliberately and review/redact before sharing. This is evidence,
+**not** a `.reg` backup or a remediation/import mechanism.
+
+Schema `persistence-detector/evidence-v3` records the build, immutable UTC scan-start
+timestamp, separate UTC export timestamp, informational host/account labels,
+collector/view scope, signal options, typed values, review reasons, and per-key
+coverage. Scan-start time is captured once before collection and retained across exports.
+Neither timestamp implies an atomic registry snapshot.
+Binary values are lowercase hex; CPython zero-length binary/default `None`
+values use a distinct `null` kind (preserving the difference from empty bytes).
+`REG_LINK` and `REG_DWORD_BIG_ENDIAN` retain the bytes returned by `winreg`, not
+coerced strings/integers. Multi-strings remain ordered string arrays;
+registry type changes are preserved. Report reads/writes are capped at 10 MiB.
+Malformed or unsupported schemas, ambiguous duplicate identities/JSON fields,
+and invalid typed data are rejected. Imported content is only parsed as JSON;
+no command, script, registry import, or path from that content is executed.
+
+Version 1 and 2 evidence are strictly migrated on import: its original registry values
+are preserved, `origin_schema` preserves its original version, and collectors missing from that
+version remain unassessed. No synthetic successful Winlogon/IFEO key coverage is
+created; older snapshots cannot establish prior absence there. An old report's lack of those collectors never implies absence. Exports include `observations` and `collector_coverage` alongside the original
+registry `entries` and `coverage` arrays.
+
+**Compare baseline** selects an earlier exported JSON report and compares it with
+the last scan snapshot. Comparison requires explicit confirmation that both scans
+came from the **same machine, Windows account and privilege context**. Host/account labels are only
+informational (not authenticated machine IDs or SIDs); mismatched or missing labels
+block comparison, and matching labels alone do not authorize it. Cancel if source
+continuity is uncertain. The core API also requires `same_source_confirmed=True`.
+Results mean inventory differences, not malware verdicts:
+
+- **Added**: new identity, with successful prior coverage of its exact key.
+- **Newly observed**: present now, but prior coverage cannot establish absence.
+- **Changed**: same case-insensitive hive/path/view/value-name identity, different
+  registry type or typed data (or task/startup/WMI metadata). Changed review reasons alone do not count.
+- **Removed**: no longer observed, with successful current coverage of its exact
+  registry key or external collector target (including an absent optional folder).
+  Startup comparison is bound to the normalized resolved folder path, not merely
+  its current-user/shared role; redirection makes old observations unassessed.
+  Tasks and WMI observations are never marked removed based on absence: permissions/elevation changes
+  can hide them. A newly seen task or WMI observation is likewise newly observed, not proven added.
+- **Unassessed**: not observed now, but relevant coverage failed, is absent, or is
+  for a different registry view. Never reported as removed.
+- **Unchanged**: same observed value and type, not proof of trustworthiness.
+
+If a service disappears entirely and no current per-service coverage record
+exists, its old values conservatively remain unassessed even if the parent
+service list was read. Baselines are user-supplied observations, not authenticated
+proof. The current GUI summarizes changes and identities; original complete
+values remain in each exported report. Selecting a baseline never changes scan
+settings or registry data. Canceling a dialog leaves the displayed result intact.
+
+## Offline tests (Linux, macOS or Windows)
 
 ```sh
-python detectpersist.py
-```
-or run persistenceDetector.exe double clicking the icon or running:
-```cmd
-detectpersist.exe
+python -m unittest discover -s tests -v
+python -m py_compile persistence_core.py evidence.py external_collectors.py audit.py detectpersist.py persistence_gui.py
 ```
 
-## Usage
-1. Launch the program.
-2. Click the 'Check Registry' button to detect any malicious registry persistence.
-3. Follow the on-screen instructions to remediate any detected entries.
+To include offscreen GUI tests, install `requirements-gui.txt` in an isolated
+environment and run the same unittest command with `QT_QPA_PLATFORM=offscreen`
+(on Windows PowerShell, set `$env:QT_QPA_PLATFORM="offscreen"` first). Without Qt,
+GUI tests are explicitly skipped rather than reported as passing.
 
-## Contributions
+Tests use an injected fake registry, including access denial, concurrent changes,
+subkey traversal, registry-view identity, strict encoding checks, and read-only
+regressions. They never inspect or modify the host registry or execute collected
+commands. Windows `winreg`, live GUI behavior and executable packaging still need
+integration testing on an isolated Windows VM. No Actions workflow or paid runner
+is introduced.
 
-Contributions are welcome! Please follow these guidelines:
+## Next milestones
 
-- Fork the repository.
-- Create a new branch (git checkout -b feature-branch).
-- Make your changes.
-- Commit your changes (git commit -am 'Add new feature').
-- Push to the branch (git push origin feature-branch).
-- Create a new Pull Request.
+1. Richer task/trigger evidence, additional WMI namespaces where justified, and
+   optional safe shortcut analysis with explicit coverage and fixture-driven tests.
+2. Additional registry persistence families and evidence enrichment, without
+   claiming that absence of findings proves cleanliness.
+3. Further UI refinement and evidence enrichment based on Windows validation.
+4. Windows VM integration and packaging. Remediation remains separately gated.
 
-## Code of Conduct
-Please review and adhere to the Code of Conduct to participate in this project.
-
-
-
-
- 
+Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Licensed under [GPL-3.0](LICENSE).

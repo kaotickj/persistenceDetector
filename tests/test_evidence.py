@@ -1,0 +1,311 @@
+import copy
+import json
+import unittest
+
+import evidence
+from persistence_core import RUN_PATHS, SERVICES_PATH, scan_registry
+from test_persistence_core import FakeRegistry
+
+
+def compare(old, new):
+    return evidence.compare(old, new, same_source_confirmed=True)
+
+
+class EvidenceTests(unittest.TestCase):
+    def doc(self, values=(), view='64-bit', error=None):
+        registry = FakeRegistry()
+        registry.add(2, SERVICES_PATH)
+        registry.add(1, RUN_PATHS[0], values)
+        if error:
+            registry.locations[1, RUN_PATHS[0]] = error
+        return evidence.to_document(scan_registry(registry, view))
+
+    def test_round_trip_typed_data_and_metadata(self):
+        document = self.doc([('binary', b'\x00\xff', 3), ('strings', ['a', 'b'], 7),
+                             ('integer', 42, 4), ('command', 'pwsh -enc !!!', 2)])
+        self.assertEqual(evidence.loads(evidence.dumps(document)), document)
+        self.assertEqual(document['schema'], evidence.SCHEMA)
+        self.assertEqual(document['build'], '0.2.0+build.5')
+        self.assertEqual(document['entries'][0]['data'], {'kind': 'bytes', 'value': '00ff'})
+        self.assertEqual(len(document['entries'][3]['reasons']), 2)
+
+    def test_add_change_type_remove_unchanged(self):
+        old = self.doc([('same', 'a', 1), ('type', 'a', 1), ('gone', 'x', 1)])
+        new = self.doc([('same', 'a', 1), ('type', 'a', 2), ('new', 'x', 1)])
+        result = compare(old, new)
+        for key in ('added', 'changed', 'removed', 'unchanged'):
+            self.assertEqual(len(result[key]), 1)
+        self.assertFalse(result['unassessed'])
+
+    def test_failed_coverage_never_claims_removed(self):
+        old = self.doc([('value', 'a', 1)])
+        for new in (self.doc(error=PermissionError('denied')), self.doc(view='32-bit')):
+            result = compare(old, new)
+            self.assertFalse(result['removed'])
+            self.assertEqual(len(result['unassessed']), 1)
+        new = self.doc()
+        new['coverage'] = []
+        self.assertEqual(len(compare(old, new)['unassessed']), 1)
+
+    def test_absent_optional_key_can_establish_absence(self):
+        old = self.doc([('value', 'a', 1)])
+        new = self.doc()
+        new['coverage'][0]['status'] = 'missing'
+        self.assertEqual(len(compare(old, new)['removed']), 1)
+
+    def test_incomplete_baseline_is_newly_observed_not_added(self):
+        old = self.doc(error=PermissionError('denied'))
+        new = self.doc([('value', 'a', 1)])
+        result = compare(old, new)
+        self.assertFalse(result['added'])
+        self.assertEqual(len(result['newly_observed']), 1)
+
+    def test_case_insensitive_identity_and_signal_changes_not_changes(self):
+        old = self.doc([('Value', 'a', 1)])
+        new = copy.deepcopy(old)
+        new['entries'][0]['name'] = 'VALUE'
+        new['entries'][0]['reasons'] = ['different triage rule']
+        self.assertEqual(len(compare(old, new)['unchanged']), 1)
+
+    def test_malformed_schema_and_duplicate_fields(self):
+        for raw in ('no json', '{}', '[]', '{"schema":1,"schema":2}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                evidence.loads(raw)
+        document = self.doc()
+        document['schema'] = 'future-schema'
+        with self.assertRaises(ValueError):
+            evidence.loads(json.dumps(document))
+
+    def test_duplicate_identities_and_bad_binary_rejected(self):
+        document = self.doc([('value', b'\xff', 3)])
+        duplicate = copy.deepcopy(document['entries'][0])
+        duplicate['name'] = 'VALUE'
+        document['entries'].append(duplicate)
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['entries'].pop()
+        document['entries'][0]['data']['value'] = 'zz'
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document = self.doc()
+        document['coverage'].append(document['coverage'][0])
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+
+    def test_invalid_view_and_payload_types(self):
+        document = self.doc([('value', 'text', 1)])
+        for field, value in (('view', 'native'), ('value_type', True), ('reasons', 'text'),
+                             ('data', {'kind': 'integer', 'value': True})):
+            bad = copy.deepcopy(document)
+            bad['entries'][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                evidence.validate(bad)
+
+    def test_import_is_data_not_execution(self):
+        value = '__import__("os").system("should never execute")'
+        document = self.doc([('data', value, 1)])
+        self.assertEqual(evidence.loads(evidence.dumps(document))['entries'][0]['data']['value'], value)
+
+    def test_registry_type_kind_range_and_coverage_consistency(self):
+        for value_type, data in (
+                (4, {'kind': 'string', 'value': 'not a DWORD'}),
+                (4, {'kind': 'integer', 'value': -1}),
+                (4, {'kind': 'integer', 'value': 2 ** 32}),
+                (11, {'kind': 'integer', 'value': 2 ** 64}),
+                (7, {'kind': 'bytes', 'value': '00'})):
+            bad = self.doc([('value', 'a', 1)])
+            bad['entries'][0].update(value_type=value_type, data=data)
+            with self.subTest(value_type=value_type, data=data), self.assertRaises(ValueError):
+                evidence.validate(bad)
+        document = self.doc([('value', 'a', 1)])
+        document['coverage'][0]['status'] = 'missing'
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['coverage'][0]['status'] = 'error'
+        evidence.validate(document)  # A partial enumeration may retain values.
+        for kind, maximum in ((4, 2 ** 32 - 1), (11, 2 ** 64 - 1)):
+            evidence.validate(self.doc([('value', maximum, kind)]))
+
+    def test_cpython_binary_types_and_empty_binary_none_round_trip(self):
+        values = [('link', b'link-bytes', 6), ('big-endian', b'\x00\x00\x00\x01', 5),
+                  ('empty-binary', None, 3), ('empty-none', None, 0),
+                  ('empty-resource', None, 8), ('empty-bytes', b'', 3)]
+        document = self.doc(values)
+        decoded = evidence.loads(evidence.dumps(document))
+        self.assertEqual(decoded, document)
+        self.assertEqual(document['entries'][2]['data'], {'kind': 'null', 'value': None})
+        self.assertEqual(document['entries'][5]['data'], {'kind': 'bytes', 'value': ''})
+        changed = copy.deepcopy(document)
+        changed['entries'][2]['data'] = {'kind': 'bytes', 'value': ''}
+        self.assertEqual(len(compare(document, changed)['changed']), 1)
+        for value_type in (1, 2, 4, 7, 11):
+            invalid = copy.deepcopy(document)
+            invalid['entries'][2]['value_type'] = value_type
+            with self.subTest(value_type=value_type), self.assertRaises(ValueError):
+                evidence.validate(invalid)
+
+    def test_source_confirmation_required_and_mismatch_blocked(self):
+        old = self.doc([('value', 'a', 1)])
+        new = self.doc()
+        with self.assertRaisesRegex(ValueError, 'unverified'):
+            evidence.compare(old, new)
+        for field in ('host_label', 'account_label'):
+            bad = copy.deepcopy(new)
+            bad['source'][field] = 'different-source'
+            with self.assertRaisesRegex(ValueError, 'mismatched'):
+                compare(old, bad)
+        new['source']['account_label'] = ''
+        with self.assertRaisesRegex(ValueError, 'missing'):
+            compare(old, new)
+
+    def test_scan_timestamp_is_frozen_and_export_time_is_separate(self):
+        from dataclasses import FrozenInstanceError
+        from unittest.mock import patch
+        registry = FakeRegistry()
+        report = scan_registry(registry)
+        with self.assertRaises(FrozenInstanceError):
+            report.scan_started_utc = 'later'
+        first = evidence.to_document(report)
+        second = evidence.to_document(report)
+        self.assertEqual(first['scan_started_utc'], second['scan_started_utc'])
+        self.assertEqual(first['scan_started_utc'], report.scan_started_utc)
+        self.assertIn('exported_utc', first)
+        first['scan_started_utc'] = 'not-a-time'
+        with self.assertRaises(ValueError):
+            evidence.validate(first)
+
+    def external_doc(self, present=True, status='scanned'):
+        document = self.doc()
+        document['collector_coverage'][0] = {
+            'collector': 'scheduled-tasks', 'target': 'local-visible-tasks',
+            'status': status, 'detail': '', 'location': ''}
+        # Replace all defaults to avoid depending on target ordering.
+        document['collector_coverage'] = [document['collector_coverage'][0]]
+        document['observations'] = ([{'collector': 'scheduled-tasks', 'target': 'local-visible-tasks',
+                                    'identity': r'\Folder\Example',
+                                    'data': {'command': 'never execute this', 'enabled': True}}]
+                                    if present else [])
+        return document
+
+    def test_external_changes_respect_coverage(self):
+        old = self.external_doc()
+        for status, expected in (('scanned', 'unassessed'), ('error', 'unassessed')):
+            new = self.external_doc(False, status)
+            self.assertEqual(len(compare(old, new)[expected]), 1)
+        new = self.external_doc()
+        new['observations'][0]['data']['enabled'] = False
+        self.assertEqual(len(compare(old, new)['changed']), 1)
+        self.assertEqual(evidence.loads(evidence.dumps(new)), new)
+
+    def test_startup_redirection_never_claims_removal_or_change(self):
+        def startup(folder, present=True):
+            document = self.doc()
+            document['collector_coverage'] = [{
+                'collector': 'startup-folders', 'target': 'current-user-startup',
+                'location': folder, 'status': 'scanned', 'detail': ''}]
+            document['observations'] = ([{
+                'collector': 'startup-folders', 'target': 'current-user-startup',
+                'identity': 'example.lnk', 'data': {'folder': folder}}] if present else [])
+            return document
+        old = startup(r'c:\users\one\startup')
+        for present in (False, True):
+            result = compare(old, startup(r'd:\redirected\startup', present))
+            self.assertEqual(len(result['unassessed']), 1)
+            self.assertFalse(result['removed'])
+            self.assertFalse(result['changed'])
+            self.assertEqual(len(result['newly_observed']), int(present))
+        self.assertEqual(len(compare(old, startup(r'c:\users\one\startup', False))['removed']), 1)
+
+    def test_strict_legacy_migration_does_not_invent_external_absence(self):
+        old = self.doc()
+        old['schema'] = evidence.LEGACY_SCHEMA
+        for key in ('origin_schema', 'observations', 'collector_coverage'):
+            del old[key]
+        old['scope']['collectors'] = list(evidence.LEGACY_SCOPE)
+        migrated = evidence.loads(json.dumps(old))
+        self.assertEqual(migrated['origin_schema'], evidence.LEGACY_SCHEMA)
+        self.assertTrue(all(c['status'] == 'error' for c in migrated['collector_coverage']))
+        self.assertEqual(len(compare(migrated, self.external_doc())['newly_observed']), 1)
+        old['unknown_field'] = 'not accepted'
+        with self.assertRaises(ValueError):
+            evidence.loads(json.dumps(old))
+
+    def test_v2_migration_preserves_old_evidence_and_marks_wmi_unknown(self):
+        old = self.external_doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        migrated = evidence.loads(json.dumps(old))
+        self.assertEqual(migrated['observations'], old['observations'])
+        wmi = [c for c in migrated['collector_coverage'] if c['collector'] == 'wmi-subscriptions']
+        self.assertEqual(wmi[0]['status'], 'error')
+        self.assertEqual(migrated['origin_schema'], evidence.V2_SCHEMA)
+        old['observations'][0]['collector'] = 'wmi-subscriptions'
+        with self.assertRaises(ValueError):
+            evidence.loads(json.dumps(old))
+
+    def test_malformed_v2_target_is_value_error_not_unhandled_type_error(self):
+        old = self.external_doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        for invalid in ([], {}, None, 123):
+            old['collector_coverage'][0]['target'] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                evidence.loads(json.dumps(old))
+
+    def test_legacy_registry_coverage_does_not_invent_winlogon_absence(self):
+        from persistence_core import WINLOGON_PATH, IFEO_PATH
+        old = self.doc()
+        old['schema'] = evidence.V2_SCHEMA
+        old['origin_schema'] = evidence.V2_SCHEMA
+        old['scope']['collectors'] = list(evidence.V2_SCOPE)
+        old['coverage'] = [c for c in old['coverage'] if c['path'] not in (WINLOGON_PATH, IFEO_PATH)]
+        old['collector_coverage'] = [c for c in old['collector_coverage'] if c['collector'] != 'wmi-subscriptions']
+        migrated = evidence.loads(json.dumps(old))
+        current = self.doc()
+        current['entries'].append({'hive': 'HKEY_LOCAL_MACHINE', 'path': WINLOGON_PATH,
+            'view': '64-bit', 'name': 'Shell', 'value_type': 1, 'category': 'Winlogon',
+            'data': {'kind': 'string', 'value': 'explorer.exe'}, 'reasons': []})
+        for item in current['coverage']:
+            if item['hive'] == 'HKEY_LOCAL_MACHINE' and item['path'] == WINLOGON_PATH:
+                item['status'] = 'scanned'
+        result = compare(migrated, current)
+        self.assertEqual(len(result['newly_observed']), 1)
+        self.assertFalse(result['added'])
+
+    def test_wmi_disappearance_is_unassessed_even_with_successful_query(self):
+        old = self.doc()
+        old['observations'] = [{'collector': 'wmi-subscriptions', 'target': 'root/subscription',
+                                'identity': 'consumer:example', 'data': {'ScriptText': 'data only'}}]
+        old['collector_coverage'] = [{'collector': 'wmi-subscriptions', 'target': 'root/subscription',
+                                     'status': 'scanned', 'detail': '', 'location': ''}]
+        new = copy.deepcopy(old)
+        new['observations'] = []
+        result = compare(old, new)
+        self.assertEqual(len(result['unassessed']), 1)
+        self.assertFalse(result['removed'])
+        self.assertEqual(len(compare(new, old)['newly_observed']), 1)
+
+    def test_external_identity_and_coverage_validation(self):
+        document = self.external_doc()
+        document['observations'].append(copy.deepcopy(document['observations'][0]))
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['observations'].pop()
+        document['collector_coverage'][0]['status'] = 'missing'
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+        document['collector_coverage'][0]['status'] = 'error'
+        evidence.validate(document)
+        document['observations'][0]['data']['nested'] = {'unvalidated': 'object'}
+        with self.assertRaises(ValueError):
+            evidence.validate(document)
+
+    def test_size_limit(self):
+        with self.assertRaises(ValueError):
+            evidence.loads(' ' * (evidence.MAX_BYTES + 1))
+
+
+if __name__ == '__main__':
+    unittest.main()
