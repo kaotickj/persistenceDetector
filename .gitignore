@@ -9,3 +9,6 @@ scratch.*
 *.spec
 old_*
 **/old_*
+
+__pycache__/
+*.py[cod]
